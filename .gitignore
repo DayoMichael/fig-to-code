@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+dist/
+.turbo/
+apps/plugin/code.js
+apps/plugin/ui.js
+apps/plugin/ui.html
+.env
+.env.*
+*.log
+.DS_Store

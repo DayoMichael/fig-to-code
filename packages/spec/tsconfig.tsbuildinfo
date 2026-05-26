@@ -1,0 +1,1 @@
+{"root":["./src/codegen.ts","./src/detected-config.ts","./src/index.ts","./src/jobs.ts","./src/prompt-envelope.ts","./src/pruned-spec.ts","./src/registry.ts","./src/sync-config.ts","./src/tokens.ts","./src/typography.ts"],"version":"5.9.3"}

@@ -1,0 +1,16 @@
+{
+  "name": "Button",
+  "kind": "component",
+  "variants": {
+    "variant": ["primary", "secondary"],
+    "size": ["sm", "md"]
+  },
+  "slots": {
+    "label": { "type": "text", "required": true }
+  },
+  "styles": {
+    "primary+md+default": {
+      "bg": "token:color/primary/500"
+    }
+  }
+}

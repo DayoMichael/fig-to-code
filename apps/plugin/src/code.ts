@@ -1,0 +1,1200 @@
+import { normalizeColorTokenName, parseFontWeightFromStyle, parseVariantName, pruneNodeTree } from "@fig2code/figma-ast";
+import type { FigmaNodeSnapshot } from "@fig2code/figma-ast";
+import type { FigmaTextTypography, JobRecord, PrunedSpec, TokenCatalog, TokenConfig, TypographyCatalog, TypographyConfig, VcsConfig } from "@fig2code/spec";
+import { isTerminalJobStatus, type EnqueueJobRequest } from "@fig2code/spec";
+import {
+  applySetupOverrides,
+  buildVcs,
+  modelIdForProvider,
+  parseCommaSeparatedPaths,
+  providerFromModelId,
+  readSetupOverrides,
+  STORAGE_KEYS,
+  summarizeDetection,
+  validateLlmApiKey,
+  type LlmProviderId,
+  type PluginConnection,
+  type SetupOverrides,
+} from "./connection.js";
+
+const DEFAULT_API_BASE = "http://localhost:3000";
+
+figma.ui.onmessage = async (msg: PluginMessage) => {
+  try {
+    if (msg.type === "ui-ready") {
+      await bootstrap();
+      return;
+    }
+
+    switch (msg.type) {
+      case "save-api-base":
+        await figma.clientStorage.setAsync(STORAGE_KEYS.apiBase, msg.apiBase);
+        figma.ui.postMessage({ type: "status", message: "API URL saved." });
+        break;
+
+      case "load-branches":
+        await loadBranches(msg);
+        break;
+
+      case "connect":
+        await connectRepo(msg);
+        break;
+
+      case "rescan":
+        await rescanRepo(msg);
+        break;
+
+      case "disconnect":
+        await disconnect();
+        break;
+
+      case "save-setup":
+        await saveSetup(msg.overrides);
+        break;
+
+      case "save-llm":
+        await saveLlmSettings(msg);
+        break;
+
+      case "push-selection":
+        await pushSelection(msg);
+        break;
+
+      case "resize-ui":
+        figma.ui.resize(msg.width, msg.height);
+        break;
+
+      case "check-job":
+        await pollJob(msg.apiBase, msg.jobId);
+        break;
+    }
+  } catch (error) {
+    figma.ui.postMessage({
+      type: "error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
+try {
+  if (figma.editorType === "dev") {
+    figma.showUI(__html__, { themeColors: true });
+  } else {
+    figma.showUI(__html__, { width: 380, height: 720, themeColors: true });
+  }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  figma.notify(`Fig2Code crashed: ${message}`, { error: true });
+}
+
+async function bootstrap(): Promise<void> {
+  const [connection, token, apiBase, atlassianEmail, llmToken, llmProvider, llmModelId] =
+    await Promise.all([
+      figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+        PluginConnection | undefined
+      >,
+      figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+      figma.clientStorage.getAsync(STORAGE_KEYS.apiBase) as Promise<string | undefined>,
+      figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<
+        string | undefined
+      >,
+      figma.clientStorage.getAsync(STORAGE_KEYS.llmToken) as Promise<string | undefined>,
+      figma.clientStorage.getAsync(STORAGE_KEYS.llmProvider) as Promise<
+        LlmProviderId | undefined
+      >,
+      figma.clientStorage.getAsync(STORAGE_KEYS.llmModelId) as Promise<string | undefined>,
+    ]);
+
+  let summary: string | null = null;
+  if (connection?.detected) {
+    try {
+      summary = summarizeDetection(connection.detected);
+    } catch {
+      summary = null;
+    }
+  }
+
+  const provider =
+    llmProvider ??
+    (llmModelId ? providerFromModelId(llmModelId) : providerFromModelId(connection?.syncConfig.llm?.modelId ?? ""));
+
+  figma.ui.postMessage({
+    type: "init",
+    apiBase: apiBase ?? DEFAULT_API_BASE,
+    connected: Boolean(connection && token),
+    connection: connection ?? null,
+    hasToken: Boolean(token),
+    atlassianEmail: atlassianEmail ?? "",
+    summary,
+    hasValidSelection: hasValidPushSelection(),
+    llm: {
+      provider,
+      modelId: modelIdForProvider(provider, llmModelId ?? connection?.syncConfig.llm?.modelId),
+      hasToken: Boolean(llmToken?.trim()),
+    },
+  });
+
+  postSelectionState();
+}
+
+async function loadBranches(msg: LoadBranchesMessage): Promise<void> {
+  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const vcs = buildVcsFromMessage(msg);
+
+  const res = await fetch(`${apiBase}/repos/refs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vcs,
+      token: msg.token,
+      atlassianEmail: msg.atlassianEmail,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `Failed to load branches (${res.status})`);
+  }
+
+  const body = (await res.json()) as { refs: Array<{ name: string; sha?: string }> };
+  figma.ui.postMessage({ type: "branches-loaded", refs: body.refs });
+}
+
+async function connectRepo(msg: ConnectMessage): Promise<void> {
+  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const vcs = buildVcsFromMessage(msg);
+
+  const res = await fetch(`${apiBase}/repos/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vcs,
+      token: msg.token,
+      atlassianEmail: msg.atlassianEmail,
+    }),
+  });
+
+  const body = (await res.json()) as ConnectApiResponse & { error?: string };
+
+  if (!res.ok) {
+    throw new Error(body.error ?? `Connect failed (${res.status})`);
+  }
+
+  const connection: PluginConnection = {
+    vcs: body.syncConfig.vcs,
+    syncConfig: body.syncConfig,
+    detected: body.detected,
+    repoUrl: body.repoUrl,
+    sessionId: body.sessionId,
+    connectedAt: new Date().toISOString(),
+    apiBase,
+  };
+
+  await figma.clientStorage.setAsync(STORAGE_KEYS.connection, connection);
+  await figma.clientStorage.setAsync(STORAGE_KEYS.token, msg.token);
+  if (msg.atlassianEmail?.trim()) {
+    await figma.clientStorage.setAsync(STORAGE_KEYS.atlassianEmail, msg.atlassianEmail.trim());
+  } else {
+    await figma.clientStorage.deleteAsync(STORAGE_KEYS.atlassianEmail);
+  }
+  await figma.clientStorage.setAsync(STORAGE_KEYS.apiBase, apiBase);
+
+  figma.ui.postMessage({
+    type: "connected",
+    connection,
+    summary: summarizeDetection(body.detected),
+  });
+}
+
+async function rescanRepo(msg: RescanMessage): Promise<void> {
+  const [connection, token, atlassianEmail] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+      PluginConnection | undefined
+    >,
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<
+      string | undefined
+    >,
+  ]);
+
+  if (!connection || !token) {
+    throw new Error("Connect a repository before rescanning.");
+  }
+
+  const apiBase = msg.apiBase ?? connection.apiBase ?? DEFAULT_API_BASE;
+  const savedNotes = connection.syncConfig.llm?.notes;
+  const vcs: VcsConfig = {
+    ...connection.vcs,
+    baseBranch: msg.baseBranch,
+    defaultPrTarget: msg.defaultPrTarget,
+  };
+
+  const res = await fetch(`${apiBase}/repos/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vcs,
+      token,
+      atlassianEmail,
+    }),
+  });
+
+  const body = (await res.json()) as ConnectApiResponse & { error?: string };
+
+  if (!res.ok) {
+    throw new Error(body.error ?? `Rescan failed (${res.status})`);
+  }
+
+  let newConnection: PluginConnection = {
+    vcs: body.syncConfig.vcs,
+    syncConfig: body.syncConfig,
+    detected: body.detected,
+    repoUrl: body.repoUrl,
+    sessionId: body.sessionId,
+    connectedAt: new Date().toISOString(),
+    apiBase,
+  };
+
+  if (savedNotes?.trim()) {
+    newConnection = {
+      ...newConnection,
+      syncConfig: {
+        ...newConnection.syncConfig,
+        llm: {
+          modelId: newConnection.syncConfig.llm?.modelId ?? "anthropic/claude-sonnet-4-6",
+          promptProfile: newConnection.syncConfig.llm?.promptProfile,
+          compaction: newConnection.syncConfig.llm?.compaction,
+          notes: savedNotes,
+        },
+      },
+    };
+  }
+
+  await figma.clientStorage.setAsync(STORAGE_KEYS.connection, newConnection);
+  await figma.clientStorage.setAsync(STORAGE_KEYS.apiBase, apiBase);
+
+  figma.ui.postMessage({
+    type: "connected",
+    connection: newConnection,
+    summary: summarizeDetection(body.detected),
+    refreshed: true,
+  });
+}
+
+async function disconnect(): Promise<void> {
+  await figma.clientStorage.deleteAsync(STORAGE_KEYS.connection);
+  await figma.clientStorage.deleteAsync(STORAGE_KEYS.token);
+  await figma.clientStorage.deleteAsync(STORAGE_KEYS.atlassianEmail);
+  await figma.clientStorage.deleteAsync(STORAGE_KEYS.llmToken);
+  await figma.clientStorage.deleteAsync(STORAGE_KEYS.llmProvider);
+  await figma.clientStorage.deleteAsync(STORAGE_KEYS.llmModelId);
+  figma.ui.postMessage({ type: "disconnected" });
+}
+
+async function saveSetup(overrides: SetupOverrides): Promise<void> {
+  const connection = (await figma.clientStorage.getAsync(
+    STORAGE_KEYS.connection,
+  )) as PluginConnection | undefined;
+
+  if (!connection) {
+    figma.ui.postMessage({
+      type: "error",
+      message: "Connect a repository before saving setup.",
+    });
+    return;
+  }
+
+  const updated = applySetupOverrides(connection, overrides);
+  const typography = await refreshTypographyCatalog(updated, overrides);
+  if (typography) {
+    updated.syncConfig.typography = typography;
+  }
+  const tokens = await refreshTokenCatalog(updated, overrides, typography?.catalog);
+  if (tokens) {
+    updated.syncConfig.tokens = tokens;
+  }
+  await figma.clientStorage.setAsync(STORAGE_KEYS.connection, updated);
+
+  figma.ui.postMessage({
+    type: "setup-saved",
+    connection: updated,
+    summary: summarizeDetection(updated.detected),
+  });
+}
+
+async function saveLlmSettings(msg: SaveLlmMessage): Promise<void> {
+  const connection = (await figma.clientStorage.getAsync(
+    STORAGE_KEYS.connection,
+  )) as PluginConnection | undefined;
+
+  if (!connection) {
+    figma.ui.postMessage({
+      type: "error",
+      message: "Connect a repository before saving LLM settings.",
+    });
+    return;
+  }
+
+  const provider = msg.provider as LlmProviderId;
+  const modelId = modelIdForProvider(provider, msg.modelId);
+  const existingToken = (await figma.clientStorage.getAsync(
+    STORAGE_KEYS.llmToken,
+  )) as string | undefined;
+  const token = msg.token.trim() || existingToken?.trim();
+
+  if (!token) {
+    figma.ui.postMessage({
+      type: "error",
+      message: "Enter your LLM API key.",
+    });
+    return;
+  }
+
+  const keyError = validateLlmApiKey(provider, token);
+  if (keyError) {
+    figma.ui.postMessage({
+      type: "error",
+      message: keyError,
+    });
+    return;
+  }
+
+  await figma.clientStorage.setAsync(STORAGE_KEYS.llmToken, token);
+  await figma.clientStorage.setAsync(STORAGE_KEYS.llmProvider, provider);
+  await figma.clientStorage.setAsync(STORAGE_KEYS.llmModelId, modelId);
+
+  const updated: PluginConnection = {
+    ...connection,
+    syncConfig: {
+      ...connection.syncConfig,
+      llm: {
+        ...connection.syncConfig.llm,
+        modelId,
+        promptProfile: connection.syncConfig.llm?.promptProfile ?? "component-v1",
+      },
+    },
+  };
+  await figma.clientStorage.setAsync(STORAGE_KEYS.connection, updated);
+
+  figma.ui.postMessage({
+    type: "llm-saved",
+    provider,
+    modelId,
+  });
+}
+
+async function pushSelection(msg: PushSelectionMessage): Promise<void> {
+  const [connection, token, atlassianEmail, llmToken] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+      PluginConnection | undefined
+    >,
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<
+      string | undefined
+    >,
+    figma.clientStorage.getAsync(STORAGE_KEYS.llmToken) as Promise<string | undefined>,
+  ]);
+
+  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+
+  if (!connection || !token) {
+    figma.ui.postMessage({
+      type: "error",
+      message: "Connect a repository before pushing components.",
+    });
+    return;
+  }
+
+  if (!connection.setupCorrectedAt) {
+    figma.ui.postMessage({
+      type: "error",
+      message: "Save project setup before pushing components.",
+    });
+    return;
+  }
+
+  if (!llmToken?.trim()) {
+    figma.ui.postMessage({
+      type: "error",
+      message: "Save LLM settings before pushing components.",
+    });
+    return;
+  }
+
+  const selectionError = getPushSelectionError();
+  if (selectionError) {
+    figma.ui.postMessage({
+      type: "error",
+      message: selectionError,
+    });
+    return;
+  }
+
+  const node = figma.currentPage.selection[0]!;
+  const setupOverrides = readSetupOverrides(connection);
+  const tokenConfig = await ensureTokenCatalog(connection, setupOverrides);
+  const tokenCatalog =
+    tokenConfig?.catalog ?? connection.syncConfig.tokens?.catalog;
+
+  // Debug: dump raw boundVariables from the first variant child
+  if ("children" in node) {
+    const firstVariant = (node as FrameNode).children?.[0];
+    if (firstVariant && "fills" in firstVariant) {
+      const rawFills = (firstVariant as FrameNode).fills;
+      const bvNode = "boundVariables" in firstVariant ? firstVariant.boundVariables : null;
+      const paintBvs = Array.isArray(rawFills)
+        ? rawFills.map((f: Paint, i: number) => ({
+            index: i,
+            type: f.type,
+            paintBoundVars: (f as { boundVariables?: unknown }).boundVariables ?? null,
+          }))
+        : [];
+      console.log("[fig2code] boundVariables debug", {
+        variantName: firstVariant.name,
+        nodeBoundVariables: bvNode ? Object.keys(bvNode) : null,
+        nodeBvFills: bvNode?.fills ?? null,
+        paintLevelBoundVars: paintBvs,
+      });
+    }
+  }
+
+  const snapshot = await nodeToSnapshot(node);
+  const prunedSpec = pruneNodeTree(snapshot, {
+    typography: connection.syncConfig.typography?.catalog,
+    tokenCatalog,
+  });
+
+  console.log("[fig2code] build component snapshot", {
+    nodeType: node.type,
+    nodeName: node.name,
+    childCount: snapshot.children?.length ?? 0,
+    variantKeys: Object.keys(snapshot.componentPropertyDefinitions ?? {}),
+  });
+  console.log("[fig2code] prunedSpec", JSON.stringify(prunedSpec, null, 2));
+  figma.ui.postMessage({ type: "debug-log", label: "prunedSpec", data: prunedSpec });
+  figma.ui.postMessage({
+    type: "debug-log",
+    label: "colorPipeline",
+    data: buildColorPipelineDebug(snapshot, prunedSpec, tokenCatalog),
+  });
+  figma.ui.postMessage({
+    type: "debug-log",
+    label: "snapshotSummary",
+    data: {
+      name: snapshot.name,
+      type: snapshot.type,
+      childCount: snapshot.children?.length ?? 0,
+      textNodes: countSnapshotNodes(snapshot, "TEXT"),
+      instanceNodes: countSnapshotNodes(snapshot, "INSTANCE"),
+      variantDefinitions: snapshot.componentPropertyDefinitions,
+      propCount: Object.keys(prunedSpec.props ?? {}).length,
+      slotCount: Object.keys(prunedSpec.slots ?? {}).length,
+      styleKeys: Object.keys(prunedSpec.styles ?? {}),
+      typographyRoles: Object.keys(prunedSpec.typography ?? {}),
+      hasLayout: Boolean(prunedSpec.layout),
+    },
+  });
+
+  const provider = msg.provider as LlmProviderId;
+  const modelId = modelIdForProvider(provider, msg.modelId);
+  const correctionNotes = msg.corrections?.trim();
+  const existingNotes = connection.syncConfig.llm?.notes ?? "";
+  const notes = correctionNotes
+    ? [existingNotes, `Corrections:\n${correctionNotes}`].filter(Boolean).join("\n\n")
+    : existingNotes;
+  const syncConfig = {
+    ...connection.syncConfig,
+    tokens: tokenConfig ?? connection.syncConfig.tokens,
+    llm: {
+      ...connection.syncConfig.llm,
+      modelId,
+      notes: notes || undefined,
+      promptProfile: connection.syncConfig.llm?.promptProfile ?? "component-v1",
+    },
+  };
+
+  // Generate token CSS from snapshot fills so preview can render custom colors
+  const tokenCssFromFills = buildTokenCssFromSnapshot(snapshot);
+  if (tokenCssFromFills && syncConfig.tokens) {
+    syncConfig.tokens = {
+      ...syncConfig.tokens,
+      sourceExcerpt: [syncConfig.tokens.sourceExcerpt, tokenCssFromFills]
+        .filter(Boolean)
+        .join("\n"),
+    };
+  } else if (tokenCssFromFills && !syncConfig.tokens) {
+    syncConfig.tokens = {
+      tokenPaths: [],
+      catalog: { sourcePath: "figma-fills", format: "css-variables", entries: [] },
+      sourceExcerpt: tokenCssFromFills,
+    };
+  }
+
+  const body: EnqueueJobRequest = {
+    intent: "component",
+    prunedSpec,
+    targets: syncConfig.platforms,
+    sessionId: connection.sessionId,
+    vcs: connection.vcs,
+    syncConfig,
+  };
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-git-token": token,
+    "x-llm-token": llmToken.trim(),
+  };
+  if (atlassianEmail?.trim()) {
+    headers["x-atlassian-email"] = atlassianEmail.trim();
+  }
+
+  const res = await fetch(`${apiBase}/jobs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `API error ${res.status}`);
+  }
+
+  const job = (await res.json()) as JobRecord;
+  figma.ui.postMessage({ type: "job-created", job, apiBase });
+  void pollJobUntilTerminal(apiBase, job.id);
+}
+
+const POLL_INTERVAL_MS = 1500;
+const POLL_TIMEOUT_MS = 120_000;
+
+async function pollJobUntilTerminal(apiBase: string, jobId: string): Promise<void> {
+  const started = Date.now();
+
+  for (;;) {
+    await sleep(POLL_INTERVAL_MS);
+    if (Date.now() - started > POLL_TIMEOUT_MS) {
+      figma.ui.postMessage({
+        type: "job-update",
+        job: { id: jobId, status: "failed", error: "Timed out waiting for job status" },
+      });
+      return;
+    }
+
+    const res = await fetch(`${apiBase}/jobs/${jobId}`);
+    if (!res.ok) continue;
+
+    const job = (await res.json()) as JobRecord;
+    figma.ui.postMessage({ type: "job-update", job });
+
+    if (isTerminalJobStatus(job.status)) {
+      return;
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollJob(apiBase: string, jobId: string): Promise<void> {
+  const res = await fetch(`${apiBase}/jobs/${jobId}`);
+  const job = (await res.json()) as JobRecord;
+  figma.ui.postMessage({ type: "job-update", job });
+}
+
+function buildVcsFromMessage(msg: VcsFormMessage): VcsConfig {
+  return buildVcs(
+    msg.provider,
+    msg.slugA,
+    msg.slugB,
+    msg.baseBranch,
+    msg.defaultPrTarget,
+  );
+}
+
+function collectTokenPaths(
+  connection: PluginConnection,
+  overrides: SetupOverrides,
+): string[] {
+  const fromOverrides = parseCommaSeparatedPaths(overrides.tokenPaths);
+  if (fromOverrides.length > 0) {
+    return fromOverrides;
+  }
+
+  const fromSync =
+    connection.syncConfig.tokens?.tokenPaths ?? connection.syncConfig.web?.tokenPaths ?? [];
+  if (fromSync.length > 0) {
+    return fromSync;
+  }
+
+  const fromDetected = [...connection.detected.tokenPaths];
+  if (
+    connection.detected.tailwindConfigPath &&
+    !fromDetected.includes(connection.detected.tailwindConfigPath)
+  ) {
+    fromDetected.push(connection.detected.tailwindConfigPath);
+  }
+
+  return fromDetected;
+}
+
+async function ensureTokenCatalog(
+  connection: PluginConnection,
+  overrides: SetupOverrides,
+): Promise<TokenConfig | undefined> {
+  const existingColors =
+    connection.syncConfig.tokens?.catalog.entries.filter((entry) => entry.category === "color")
+      .length ?? 0;
+  if (existingColors > 0) {
+    return connection.syncConfig.tokens;
+  }
+
+  return refreshTokenCatalog(connection, overrides, connection.syncConfig.typography?.catalog);
+}
+
+async function refreshTypographyCatalog(
+  connection: PluginConnection,
+  overrides: SetupOverrides,
+): Promise<TypographyConfig | undefined> {
+  const [token, atlassianEmail] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<string | undefined>,
+  ]);
+
+  if (!token) {
+    return connection.syncConfig.typography;
+  }
+
+  const fontPaths = parseCommaSeparatedPaths(overrides.fontPaths);
+  const tokenPaths = collectTokenPaths(connection, overrides);
+
+  if (fontPaths.length === 0) {
+    return connection.syncConfig.typography;
+  }
+
+  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+  const web = connection.syncConfig.web;
+
+  const res = await fetch(`${apiBase}/repos/typography`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vcs: connection.vcs,
+      token,
+      atlassianEmail,
+      fontPaths,
+      tokenPaths: tokenPaths.length > 0 ? tokenPaths : connection.syncConfig.tokens?.tokenPaths,
+      tailwindConfigPath: connection.detected.tailwindConfigPath,
+      styleSystem: overrides.styleSystem ?? web?.styleSystem,
+    }),
+  });
+
+  if (!res.ok) {
+    return connection.syncConfig.typography;
+  }
+
+  try {
+    const body = (await res.json()) as { typography?: TypographyConfig };
+    return body.typography ?? connection.syncConfig.typography;
+  } catch {
+    return connection.syncConfig.typography;
+  }
+}
+
+async function refreshTokenCatalog(
+  connection: PluginConnection,
+  overrides: SetupOverrides,
+  typographyCatalog?: TypographyCatalog,
+): Promise<TokenConfig | undefined> {
+  const [token, atlassianEmail] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<string | undefined>,
+  ]);
+
+  if (!token) {
+    return connection.syncConfig.tokens;
+  }
+
+  const parsedTokenPaths = collectTokenPaths(connection, overrides);
+  if (parsedTokenPaths.length === 0) {
+    return connection.syncConfig.tokens;
+  }
+
+  const tokenPaths = parsedTokenPaths;
+
+  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+  const web = connection.syncConfig.web;
+
+  const res = await fetch(`${apiBase}/repos/tokens`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vcs: connection.vcs,
+      token,
+      atlassianEmail,
+      tokenPaths,
+      fontPaths: connection.detected.fontPaths,
+      tailwindConfigPath: connection.detected.tailwindConfigPath,
+      styleSystem: overrides.styleSystem ?? web?.styleSystem,
+      typographyCatalog,
+    }),
+  });
+
+  if (!res.ok) {
+    return connection.syncConfig.tokens;
+  }
+
+  try {
+    const body = (await res.json()) as { tokens?: TokenConfig };
+    return body.tokens ?? connection.syncConfig.tokens;
+  } catch {
+    return connection.syncConfig.tokens;
+  }
+}
+
+function readTextTypography(node: TextNode): FigmaTextTypography | undefined {
+  const typography: FigmaTextTypography = {};
+
+  if (typeof node.fontSize === "number") {
+    typography.fontSize = node.fontSize;
+  }
+
+  if (typeof node.fontWeight === "number") {
+    typography.fontWeight = node.fontWeight;
+  } else if (node.fontName !== figma.mixed) {
+    typography.fontWeight = parseFontWeightFromStyle(node.fontName.style);
+  }
+
+  if (node.fontName !== figma.mixed) {
+    typography.fontFamily = node.fontName.family;
+    typography.fontStyle = node.fontName.style;
+  }
+
+  if (node.lineHeight !== figma.mixed && typeof node.lineHeight === "object") {
+    if (node.lineHeight.unit === "PIXELS") {
+      typography.lineHeight = node.lineHeight.value;
+    } else if (node.lineHeight.unit === "PERCENT" && typeof node.fontSize === "number") {
+      typography.lineHeight = (node.fontSize * node.lineHeight.value) / 100;
+    }
+  }
+
+  if (node.letterSpacing !== figma.mixed && typeof node.letterSpacing === "object") {
+    if (node.letterSpacing.unit === "PIXELS") {
+      typography.letterSpacing = node.letterSpacing.value;
+    } else if (node.letterSpacing.unit === "PERCENT" && typeof node.fontSize === "number") {
+      typography.letterSpacing = (node.fontSize * node.letterSpacing.value) / 100;
+    }
+  }
+
+  return Object.keys(typography).length > 0 ? typography : undefined;
+}
+
+async function resolveFillColorToken(
+  boundAlias?: VariableAlias,
+): Promise<string | undefined> {
+  if (!boundAlias || !figma.variables) {
+    return undefined;
+  }
+
+  try {
+    const variable = await figma.variables.getVariableByIdAsync(boundAlias.id);
+    if (!variable) {
+      return undefined;
+    }
+    return normalizeColorTokenName(variable.name);
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveVariableToken(
+  boundAlias?: VariableAlias,
+): Promise<string | undefined> {
+  if (!boundAlias || !figma.variables) {
+    return undefined;
+  }
+
+  try {
+    const variable = await figma.variables.getVariableByIdAsync(boundAlias.id);
+    if (!variable) {
+      return undefined;
+    }
+    return variable.name.replace(/\//g, "-").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function buildColorPipelineDebug(
+  snapshot: FigmaNodeSnapshot,
+  prunedSpec: PrunedSpec,
+  _tokenCatalog?: TokenCatalog,
+) {
+  const variantComponents = (snapshot.children ?? []).filter((child) => child.type === "COMPONENT");
+
+  const allFillsMissingTokens = variantComponents.every((variant) =>
+    (variant.fills ?? []).every((fill) => !fill.colorToken),
+  );
+
+  const hasRawTokens = Object.values(prunedSpec.styles ?? {}).some((style) => style.bg?.includes("raw/"));
+
+  let diagnosis: string;
+  if (allFillsMissingTokens && variantComponents.length > 0) {
+    diagnosis =
+      "No bound variables found on fills — ensure fills in Figma are linked to color variables (right-click fill → Apply variable).";
+  } else if (hasRawTokens) {
+    diagnosis =
+      "Some fills have no bound variables — raw RGB fallback used. Bind variables to fills in Figma.";
+  } else {
+    diagnosis = "Color variable names captured successfully from Figma.";
+  }
+
+  return {
+    figmaFills: variantComponents.map((variant) => ({
+      variantName: variant.name,
+      fills: (variant.fills ?? []).map((fill) => ({
+        rgb: fill.color
+          ? [
+              Math.round(fill.color.r * 255),
+              Math.round(fill.color.g * 255),
+              Math.round(fill.color.b * 255),
+            ]
+          : null,
+        colorToken: fill.colorToken ?? null,
+      })),
+    })),
+    prunedSpecBg: Object.fromEntries(
+      Object.entries(prunedSpec.styles ?? {}).map(([key, style]) => [key, style.bg ?? null]),
+    ),
+    diagnosis,
+  };
+}
+
+/**
+ * Build CSS variable definitions from snapshot fills that have both
+ * a colorToken name and an RGB value — used to render the preview.
+ */
+function buildTokenCssFromSnapshot(snapshot: FigmaNodeSnapshot): string | undefined {
+  const vars = new Map<string, string>();
+
+  function collectFromNode(node: FigmaNodeSnapshot): void {
+    for (const fill of node.fills ?? []) {
+      if (fill.colorToken && fill.color) {
+        const r = Math.round(fill.color.r * 255);
+        const g = Math.round(fill.color.g * 255);
+        const b = Math.round(fill.color.b * 255);
+        vars.set(`--${fill.colorToken}`, `rgb(${r}, ${g}, ${b})`);
+      }
+    }
+    for (const child of node.children ?? []) {
+      collectFromNode(child);
+    }
+  }
+
+  collectFromNode(snapshot);
+
+  if (vars.size === 0) {
+    return undefined;
+  }
+
+  const lines = [":root {"];
+  for (const [name, value] of vars) {
+    lines.push(`  ${name}: ${value};`);
+  }
+  lines.push("}");
+  return lines.join("\n");
+}
+
+async function nodeToSnapshot(node: SceneNode): Promise<FigmaNodeSnapshot> {
+  const base: FigmaNodeSnapshot = {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    visible: node.visible,
+  };
+
+  if (node.type === "TEXT") {
+    base.characters = node.characters;
+    base.typography = readTextTypography(node);
+  }
+
+  if ("fills" in node && Array.isArray(node.fills)) {
+    const boundFills =
+      "boundVariables" in node && node.boundVariables?.fills
+        ? node.boundVariables.fills
+        : undefined;
+
+    const solidFills: FigmaNodeSnapshot["fills"] = [];
+
+    for (let index = 0; index < node.fills.length; index += 1) {
+      const fill = node.fills[index]!;
+      if (fill.type !== "SOLID") continue;
+
+      let colorToken: string | undefined;
+
+      // Path 1: node-level boundVariables.fills[index]
+      if (boundFills) {
+        colorToken = await resolveFillColorToken(boundFills[index]);
+      }
+
+      // Path 2: paint-level boundVariables.color (SolidPaint)
+      if (!colorToken) {
+        const paintBv = (fill as { boundVariables?: { color?: VariableAlias } }).boundVariables;
+        if (paintBv?.color) {
+          colorToken = await resolveFillColorToken(paintBv.color);
+        }
+      }
+
+      solidFills.push({
+        type: fill.type,
+        color: fill.color,
+        colorToken,
+      });
+    }
+
+    if (solidFills.length > 0) {
+      base.fills = solidFills;
+    }
+  }
+
+  if ("cornerRadius" in node && typeof node.cornerRadius === "number") {
+    base.cornerRadius = node.cornerRadius;
+    const bv = "boundVariables" in node ? node.boundVariables : undefined;
+    const radiusAlias = bv?.topLeftRadius ?? (bv as Record<string, unknown>)?.cornerRadius;
+    base.cornerRadiusToken = await resolveVariableToken(radiusAlias as VariableAlias | undefined);
+  }
+
+  if ("layoutMode" in node && node.layoutMode !== "NONE") {
+    base.layoutMode = node.layoutMode;
+  }
+
+  if ("itemSpacing" in node && typeof node.itemSpacing === "number") {
+    base.itemSpacing = node.itemSpacing;
+    const bv = "boundVariables" in node ? node.boundVariables : undefined;
+    base.itemSpacingToken = await resolveVariableToken(bv?.itemSpacing);
+  }
+
+  if ("paddingTop" in node) {
+    base.paddingTop = node.paddingTop;
+    base.paddingRight = node.paddingRight;
+    base.paddingBottom = node.paddingBottom;
+    base.paddingLeft = node.paddingLeft;
+
+    const bv = "boundVariables" in node ? node.boundVariables : undefined;
+    const [pt, pr, pb, pl] = await Promise.all([
+      resolveVariableToken(bv?.paddingTop),
+      resolveVariableToken(bv?.paddingRight),
+      resolveVariableToken(bv?.paddingBottom),
+      resolveVariableToken(bv?.paddingLeft),
+    ]);
+    if (pt || pr || pb || pl) {
+      base.paddingTokens = { top: pt, right: pr, bottom: pb, left: pl };
+    }
+  }
+
+  if ("componentPropertyReferences" in node && node.componentPropertyReferences) {
+    base.componentPropertyReferences = { ...node.componentPropertyReferences };
+  }
+
+  if ("componentProperties" in node && node.componentProperties) {
+    base.componentProperties = snapshotComponentProperties(node.componentProperties);
+  }
+
+  if (node.type === "COMPONENT" && node.parent?.type === "COMPONENT_SET") {
+    base.variantValues = parseVariantName(node.name);
+  }
+
+  let mainComponent: ComponentNode | null = null;
+  if (node.type === "INSTANCE") {
+    mainComponent = await node.getMainComponentAsync();
+    if (mainComponent) {
+      base.mainComponent = {
+        name: mainComponent.name,
+        key: mainComponent.key,
+      };
+    }
+  }
+
+  const propertyDefinitions = await readComponentPropertyDefinitions(node, mainComponent);
+  if (propertyDefinitions) {
+    base.componentPropertyDefinitions = snapshotPropertyDefinitions(propertyDefinitions);
+  }
+
+  if ("children" in node) {
+    base.children = await Promise.all(node.children.map((child) => nodeToSnapshot(child)));
+  }
+
+  return base;
+}
+
+function snapshotComponentProperties(
+  properties: ComponentProperties,
+): Record<string, boolean | string> {
+  const result: Record<string, boolean | string> = {};
+
+  for (const [key, value] of Object.entries(properties)) {
+    if (typeof value === "boolean" || typeof value === "string") {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+function snapshotPropertyDefinitions(
+  defs: Record<
+    string,
+    {
+      type: string;
+      defaultValue?: unknown;
+      variantOptions?: string[];
+      preferredValues?: Array<{ key?: string; name?: string }>;
+    }
+  >,
+): FigmaNodeSnapshot["componentPropertyDefinitions"] {
+  const result: NonNullable<FigmaNodeSnapshot["componentPropertyDefinitions"]> = {};
+
+  for (const [key, def] of Object.entries(defs)) {
+    result[key] = {
+      type: def.type,
+      defaultValue: def.defaultValue,
+      variantOptions: def.variantOptions?.map(String),
+    };
+
+    if ("preferredValues" in def && Array.isArray(def.preferredValues)) {
+      result[key]!.preferredValues = def.preferredValues.map((entry) => ({
+        key: entry.key,
+        name: "name" in entry && typeof entry.name === "string" ? entry.name : undefined,
+      }));
+    }
+  }
+
+  return result;
+}
+
+function countSnapshotNodes(node: FigmaNodeSnapshot, type: string): number {
+  let count = node.type === type ? 1 : 0;
+  for (const child of node.children ?? []) {
+    count += countSnapshotNodes(child, type);
+  }
+  return count;
+}
+
+async function readComponentPropertyDefinitions(
+  node: SceneNode,
+  resolvedMainComponent: ComponentNode | null = null,
+): Promise<FigmaNodeSnapshot["componentPropertyDefinitions"] | undefined> {
+  if (node.type === "COMPONENT_SET") {
+    return node.componentPropertyDefinitions as FigmaNodeSnapshot["componentPropertyDefinitions"];
+  }
+
+  if (node.type === "COMPONENT" && node.parent?.type !== "COMPONENT_SET") {
+    return node.componentPropertyDefinitions as FigmaNodeSnapshot["componentPropertyDefinitions"];
+  }
+
+  if (node.type === "INSTANCE") {
+    const main = resolvedMainComponent ?? (await node.getMainComponentAsync());
+    if (!main) return undefined;
+
+    if (main.parent?.type === "COMPONENT_SET") {
+      return main.parent
+        .componentPropertyDefinitions as FigmaNodeSnapshot["componentPropertyDefinitions"];
+    }
+    if (main.type === "COMPONENT") {
+      return main.componentPropertyDefinitions as FigmaNodeSnapshot["componentPropertyDefinitions"];
+    }
+  }
+
+  return undefined;
+}
+
+const PUSH_SELECTION_TYPES = new Set(["COMPONENT", "COMPONENT_SET", "INSTANCE"]);
+
+function getPushSelectionError(): string | null {
+  const selection = figma.currentPage.selection;
+
+  if (selection.length !== 1) {
+    return "Select exactly one component, component set, or instance.";
+  }
+
+  if (!PUSH_SELECTION_TYPES.has(selection[0]!.type)) {
+    return "Select a main component, component set, or instance — not a frame or group.";
+  }
+
+  return null;
+}
+
+function hasValidPushSelection(): boolean {
+  return getPushSelectionError() === null;
+}
+
+function postSelectionState(): void {
+  const selection = figma.currentPage.selection;
+  const node = selection.length === 1 ? selection[0]! : null;
+
+  figma.ui.postMessage({
+    type: "selection-changed",
+    hasValidSelection: hasValidPushSelection(),
+    selectionId: node?.id ?? null,
+    selectionName: node?.name ?? null,
+  });
+}
+
+figma.on("selectionchange", postSelectionState);
+
+interface ConnectApiResponse {
+  sessionId: string;
+  repoUrl: string;
+  detected: PluginConnection["detected"];
+  syncConfig: PluginConnection["syncConfig"];
+  refs: Array<{ name: string; sha?: string }>;
+}
+
+interface VcsFormMessage {
+  provider: "github" | "bitbucket";
+  slugA: string;
+  slugB: string;
+  baseBranch: string;
+  defaultPrTarget: string;
+  token: string;
+  atlassianEmail?: string;
+  apiBase?: string;
+}
+
+type LoadBranchesMessage = VcsFormMessage;
+type ConnectMessage = VcsFormMessage;
+
+interface RescanMessage {
+  type: "rescan";
+  apiBase?: string;
+  baseBranch: string;
+  defaultPrTarget: string;
+}
+
+interface SaveLlmMessage {
+  type: "save-llm";
+  provider: string;
+  modelId: string;
+  token: string;
+}
+
+interface PushSelectionMessage {
+  type: "push-selection";
+  apiBase: string;
+  provider: string;
+  modelId: string;
+  corrections?: string;
+}
+
+type PluginMessage =
+  | { type: "ui-ready" }
+  | { type: "resize-ui"; width: number; height: number }
+  | { type: "save-api-base"; apiBase: string }
+  | LoadBranchesMessage & { type: "load-branches" }
+  | ConnectMessage & { type: "connect" }
+  | RescanMessage
+  | { type: "disconnect" }
+  | { type: "save-setup"; overrides: SetupOverrides }
+  | SaveLlmMessage
+  | PushSelectionMessage
+  | { type: "check-job"; jobId: string; apiBase: string };

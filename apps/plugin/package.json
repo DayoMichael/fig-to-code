@@ -1,0 +1,22 @@
+{
+  "name": "@fig2code/plugin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && node scripts/bundle.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node scripts/bundle.mjs --watch",
+    "clean": "rm -rf dist",
+    "test": "node --import tsx --test $(find src -name '*.test.ts')"
+  },
+  "dependencies": {
+    "@fig2code/figma-ast": "workspace:*",
+    "@fig2code/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.110.0",
+    "esbuild": "^0.25.5",
+    "tsx": "^4.19.4"
+  }
+}

@@ -1,0 +1,14 @@
+Here is the generated component JSON:
+
+```json
+{
+  "patches": [
+    {
+      "path": "src/components/Button/Button.tsx",
+      "action": "create",
+      "content": "export function Button() { return null; }\n"
+    }
+  ],
+  "summary": "Generated Button component."
+}
+```

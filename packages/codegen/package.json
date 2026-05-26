@@ -1,0 +1,29 @@
+{
+  "name": "@fig2code/codegen",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "test": "node --import tsx --test $(find src -name '*.test.ts')"
+  },
+  "dependencies": {
+    "@fig2code/llm": "workspace:*",
+    "@fig2code/prompts": "workspace:*",
+    "@fig2code/repo": "workspace:*",
+    "@fig2code/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4"
+  }
+}

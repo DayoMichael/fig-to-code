@@ -1,0 +1,15 @@
+{
+  "patches": [
+    {
+      "path": "src/components/Button/Button.tsx",
+      "action": "create",
+      "content": "export interface ButtonProps {\n  variant?: 'primary' | 'secondary';\n  size?: 'sm' | 'md';\n  children: React.ReactNode;\n}\n\nexport function Button({ variant = 'primary', size = 'md', children }: ButtonProps) {\n  return <button data-variant={variant} data-size={size}>{children}</button>;\n}\n"
+    },
+    {
+      "path": "src/components/Button/index.ts",
+      "action": "create",
+      "content": "export { Button } from './Button';\nexport type { ButtonProps } from './Button';\n"
+    }
+  ],
+  "summary": "Generated Button component with variant and size props."
+}

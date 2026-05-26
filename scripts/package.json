@@ -1,0 +1,22 @@
+{
+  "name": "@fig2code/scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "scaffold": "node --import tsx src/scaffold.ts",
+    "prompt-lab": "node --import tsx src/prompt-lab.ts",
+    "test-onboard": "node --import tsx src/test-onboard.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@fig2code/git-host": "workspace:*",
+    "@fig2code/prompts": "workspace:*",
+    "@fig2code/repo": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4"
+  }
+}

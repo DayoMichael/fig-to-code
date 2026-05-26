@@ -1,0 +1,23 @@
+{
+  "name": "fig2code",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Fig2Code — Figma plugin that generates production-ready code into your team's repo",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3"
+  },
+  "packageManager": "pnpm@10.11.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

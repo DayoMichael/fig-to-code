@@ -1,0 +1,365 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Hono } from "hono";
+import type { DetectedProjectConfig, SyncConfig, TypographyCatalog, VcsConfig } from "@fig2code/spec";
+import {
+  fixturePath,
+  onboardLocalRepo,
+  onboardRemoteRepo,
+  buildTypographyConfigFromRemote,
+  buildTokenConfigFromRemote,
+} from "@fig2code/repo";
+import { createGitHostProvider, GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
+
+export interface ConnectRequestBody {
+  vcs: VcsConfig;
+  token: string;
+  atlassianEmail?: string;
+}
+
+export interface ConnectResponseBody {
+  sessionId: string;
+  repoUrl: string;
+  detected: DetectedProjectConfig;
+  syncConfig: SyncConfig;
+  refs: Array<{ name: string; sha?: string }>;
+  workspacePath: string;
+}
+
+export function createReposRouter(): Hono {
+  const app = new Hono();
+
+  app.post("/refs", async (c) => {
+    let provider: string | undefined;
+
+    try {
+      const body = parseConnectBody(await c.req.json());
+      provider = body.vcs.provider;
+      const git = createGitHostProvider(body.vcs.provider);
+      const refs = await git.listRefs(body.vcs, gitAuth(body));
+      return c.json({ refs });
+    } catch (error) {
+      return repoError(c, error, { provider });
+    }
+  });
+
+  app.get("/refs", async (c) => {
+    const provider = c.req.query("provider");
+    const token = c.req.header("x-git-token");
+
+    if (!provider || !token) {
+      return c.json({ error: "provider query and x-git-token header required" }, 400);
+    }
+
+    const vcs = vcsFromQuery(c.req.query());
+    const git = createGitHostProvider(provider);
+    const refs = await git.listRefs(vcs, token);
+
+    return c.json({ refs });
+  });
+
+  app.post("/connect", async (c) => {
+    let targetDir: string | undefined;
+    let provider: string | undefined;
+
+    try {
+      const body = parseConnectBody(await c.req.json());
+      provider = body.vcs.provider;
+      targetDir = await mkdtemp(join(tmpdir(), `fig2code-connect-${body.vcs.provider}-`));
+
+      const result = await onboardRemoteRepo({
+        vcs: body.vcs,
+        token: body.token,
+        atlassianEmail: body.atlassianEmail,
+        targetDir,
+        writeConfig: true,
+      });
+
+      const response: ConnectResponseBody = {
+        sessionId: randomUUID(),
+        repoUrl: formatRepoUrl(body.vcs),
+        detected: result.detected,
+        syncConfig: result.syncConfig,
+        refs: result.refs ?? [],
+        workspacePath: targetDir,
+      };
+
+      return c.json(response);
+    } catch (error) {
+      if (targetDir) {
+        await rm(targetDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      return repoError(c, error, { provider, upstream: true });
+    }
+  });
+
+  app.post("/typography", async (c) => {
+    try {
+      const body = parseTypographyBody(await c.req.json());
+      const typography = await buildTypographyConfigFromRemote(body);
+      return c.json({ typography });
+    } catch (error) {
+      return repoError(c, error, { upstream: true });
+    }
+  });
+
+  app.post("/tokens", async (c) => {
+    try {
+      const body = parseTokenBody(await c.req.json());
+      const tokens = await buildTokenConfigFromRemote(body);
+      return c.json({ tokens });
+    } catch (error) {
+      return repoError(c, error, { upstream: true });
+    }
+  });
+
+  app.post("/detect/local", async (c) => {
+    const body = (await c.req.json()) as {
+      localPath: string;
+      vcs: VcsConfig;
+    };
+
+    const result = await onboardLocalRepo({
+      rootDir: body.localPath,
+      vcs: body.vcs,
+      writeConfig: false,
+    });
+
+    return c.json({
+      detected: result.detected,
+      syncConfig: result.syncConfig,
+    });
+  });
+
+  app.post("/onboard/local", async (c) => {
+    const body = (await c.req.json()) as {
+      localPath: string;
+      vcs: VcsConfig;
+    };
+
+    const result = await onboardLocalRepo({
+      rootDir: body.localPath,
+      vcs: body.vcs,
+      writeConfig: true,
+    });
+
+    return c.json(result);
+  });
+
+  app.post("/onboard/remote", async (c) => {
+    const body = (await c.req.json()) as {
+      vcs: VcsConfig;
+      token: string;
+      targetDir: string;
+    };
+
+    const result = await onboardRemoteRepo({
+      vcs: body.vcs,
+      token: body.token,
+      targetDir: body.targetDir,
+      writeConfig: true,
+    });
+
+    return c.json(result);
+  });
+
+  app.get("/fixtures", (c) =>
+    c.json({
+      tailwind: fixturePath("tailwind-app"),
+      styled: fixturePath("styled-app"),
+    }),
+  );
+
+  return app;
+}
+
+function parseConnectBody(raw: unknown): ConnectRequestBody {
+  const body = raw as ConnectRequestBody;
+
+  if (!body?.token?.trim()) {
+    throw new Error("token is required");
+  }
+
+  if (!body?.vcs?.provider) {
+    throw new Error("vcs.provider is required");
+  }
+
+  if (body.vcs.provider === "github") {
+    if (!body.vcs.owner?.trim() || !body.vcs.repo?.trim()) {
+      throw new Error("GitHub requires owner and repo");
+    }
+  }
+
+  if (body.vcs.provider === "bitbucket") {
+    if (!body.vcs.workspace?.trim() || !body.vcs.repo?.trim()) {
+      throw new Error("Bitbucket requires workspace and repo");
+    }
+  }
+
+  body.token = body.token.trim();
+  body.atlassianEmail = body.atlassianEmail?.trim() || undefined;
+
+  body.vcs.baseBranch = body.vcs.baseBranch?.trim() || "main";
+  body.vcs.defaultPrTarget = body.vcs.defaultPrTarget?.trim() || body.vcs.baseBranch;
+
+  return body;
+}
+
+function parseTokenPaths(raw: unknown): string[] {
+  const source = raw as { tokenPaths?: unknown; tokenPath?: unknown };
+
+  if (Array.isArray(source.tokenPaths)) {
+    const paths = source.tokenPaths.map(String).map((entry) => entry.trim()).filter(Boolean);
+    if (paths.length > 0) {
+      return paths;
+    }
+  }
+
+  if (typeof source.tokenPath === "string" && source.tokenPath.trim()) {
+    return source.tokenPath
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  throw new Error("tokenPaths array is required");
+}
+
+function parseTypographyBody(raw: unknown) {
+  const body = parseConnectBody(raw) as ConnectRequestBody & {
+    fontPaths: string[];
+    tokenPaths?: string[];
+    tokenPath?: string;
+    tailwindConfigPath?: string;
+    styleSystem?: DetectedProjectConfig["styleSystem"];
+  };
+
+  const source = raw as {
+    fontPaths?: string[];
+    tokenPaths?: string[];
+    tokenPath?: string;
+    tailwindConfigPath?: string;
+    styleSystem?: DetectedProjectConfig["styleSystem"];
+  };
+
+  if (!Array.isArray(source.fontPaths)) {
+    throw new Error("fontPaths array is required");
+  }
+
+  return {
+    vcs: body.vcs,
+    token: body.token,
+    atlassianEmail: body.atlassianEmail,
+    fontPaths: source.fontPaths.map(String).filter(Boolean),
+    tokenPaths: parseTokenPaths(source),
+    tailwindConfigPath: source.tailwindConfigPath?.trim() || undefined,
+    styleSystem: source.styleSystem,
+  };
+}
+
+function parseTokenBody(raw: unknown) {
+  const body = parseConnectBody(raw) as ConnectRequestBody & {
+    tokenPaths: string[];
+    fontPaths?: string[];
+    tailwindConfigPath?: string;
+    styleSystem?: DetectedProjectConfig["styleSystem"];
+    typographyCatalog?: TypographyCatalog;
+  };
+
+  const source = raw as {
+    tokenPaths?: string[];
+    tokenPath?: string;
+    fontPaths?: string[];
+    tailwindConfigPath?: string;
+    styleSystem?: DetectedProjectConfig["styleSystem"];
+    typographyCatalog?: TypographyCatalog;
+  };
+
+  return {
+    vcs: body.vcs,
+    token: body.token,
+    atlassianEmail: body.atlassianEmail,
+    tokenPaths: parseTokenPaths(source),
+    fontPaths: Array.isArray(source.fontPaths)
+      ? source.fontPaths.map(String).map((entry) => entry.trim()).filter(Boolean)
+      : undefined,
+    tailwindConfigPath: source.tailwindConfigPath?.trim() || undefined,
+    styleSystem: source.styleSystem,
+    typographyCatalog: source.typographyCatalog,
+  };
+}
+
+function gitAuth(body: ConnectRequestBody) {
+  return {
+    token: body.token,
+    atlassianEmail: body.atlassianEmail,
+  };
+}
+
+export function formatRepoUrl(vcs: VcsConfig): string {
+  switch (vcs.provider) {
+    case "github":
+      return `github.com/${vcs.owner}/${vcs.repo}`;
+    case "bitbucket":
+      return `bitbucket.org/${vcs.workspace}/${vcs.repo}`;
+    case "gitlab":
+      return `gitlab.com/${vcs.projectIdOrPath}`;
+  }
+}
+
+function vcsFromQuery(query: Record<string, string | undefined>): VcsConfig {
+  if (query.provider === "github") {
+    return {
+      provider: "github",
+      owner: query.owner ?? "",
+      repo: query.repo ?? "",
+      baseBranch: query.baseBranch ?? "main",
+      defaultPrTarget: query.defaultPrTarget ?? query.baseBranch ?? "main",
+    };
+  }
+
+  if (query.provider === "bitbucket") {
+    return {
+      provider: "bitbucket",
+      workspace: query.workspace ?? "",
+      repo: query.repo ?? "",
+      baseBranch: query.baseBranch ?? "main",
+      defaultPrTarget: query.defaultPrTarget ?? query.baseBranch ?? "main",
+    };
+  }
+
+  throw new Error(`Unsupported provider ${query.provider}`);
+}
+
+function repoError(
+  c: { json: (data: unknown, status?: number) => Response },
+  error: unknown,
+  options: { provider?: string; upstream?: boolean } = {},
+) {
+  if (error instanceof GitHostApiError) {
+    const status =
+      error.status === 401 || error.status === 403
+        ? error.status
+        : options.upstream
+          ? 502
+          : 500;
+    return c.json(
+      { error: formatGitHostApiError(error, options.provider) },
+      status,
+    );
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const validation =
+    message.includes("required") ||
+    message.includes("requires") ||
+    message.includes("Unsupported provider");
+
+  if (validation) {
+    return c.json({ error: message }, 400);
+  }
+
+  return c.json({ error: message }, options.upstream ? 502 : 500);
+}

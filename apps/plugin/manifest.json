@@ -1,0 +1,20 @@
+{
+  "name": "Fig2Code",
+  "id": "fig2code-dev",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma", "dev"],
+  "capabilities": ["inspect"],
+  "networkAccess": {
+    "allowedDomains": ["https://api.fig2code.dev"],
+    "devAllowedDomains": [
+      "http://localhost:3000",
+      "https://localhost:3000",
+      "http://localhost",
+      "https://localhost"
+    ],
+    "reasoning": "Fig2Code calls the hosted API in production and localhost:3000 during local development."
+  },
+  "documentAccess": "dynamic-page"
+}
