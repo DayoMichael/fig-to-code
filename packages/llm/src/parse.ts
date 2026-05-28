@@ -122,6 +122,36 @@ export function validateCodegenOutput(output: CodegenOutput): void {
   if (output.summary !== undefined && typeof output.summary !== "string") {
     throw new Error("Invalid codegen output: summary must be a string");
   }
+
+  if (output.changeSummary !== undefined) {
+    validateChangeSummary(output.changeSummary);
+  }
+}
+
+function validateChangeSummary(changeSummary: NonNullable<CodegenOutput["changeSummary"]>): void {
+  if (!changeSummary || typeof changeSummary !== "object") {
+    throw new Error("Invalid codegen output: changeSummary must be an object");
+  }
+  if (
+    changeSummary.hasBreakingChanges !== undefined &&
+    typeof changeSummary.hasBreakingChanges !== "boolean"
+  ) {
+    throw new Error("Invalid codegen output: changeSummary.hasBreakingChanges must be boolean");
+  }
+  if (!Array.isArray(changeSummary.changes)) {
+    throw new Error("Invalid codegen output: changeSummary.changes must be an array");
+  }
+  for (const [index, item] of changeSummary.changes.entries()) {
+    if (!item || typeof item !== "object" || typeof item.text !== "string" || !item.text.trim()) {
+      throw new Error(`Invalid changeSummary.changes[${index}]: text is required`);
+    }
+    if (typeof item.breaking !== "boolean") {
+      throw new Error(`Invalid changeSummary.changes[${index}]: breaking must be boolean`);
+    }
+    if (item.fix !== undefined && typeof item.fix !== "string") {
+      throw new Error(`Invalid changeSummary.changes[${index}]: fix must be a string`);
+    }
+  }
 }
 
 function validatePatch(patch: FilePatch, index: number): void {

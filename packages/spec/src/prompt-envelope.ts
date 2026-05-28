@@ -6,6 +6,7 @@ export type PromptSlotId =
   | "token_resolver"
   | "registry_hints"
   | "example_styles"
+  | "existing_files"
   | "output_contract"
   | "repair_context";
 

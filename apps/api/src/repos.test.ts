@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { Hono } from "hono";
 import { fixturePath } from "@fig2code/repo";
+import { setFetchImplementation, resetFetchImplementation } from "@fig2code/git-host";
+import type { ResolveComponentResponse } from "@fig2code/spec";
 import app from "./index.js";
-import { formatRepoUrl } from "./repos.js";
+import { createBundleStore } from "./bundle-store.js";
+import { createReposRouter, formatRepoUrl } from "./repos.js";
 
 describe("repos routes", () => {
   it("GET /repos/fixtures lists fixture paths", async () => {
@@ -87,5 +91,164 @@ describe("repos routes", () => {
       }),
       "bitbucket.org/acme-team/design-system",
     );
+  });
+
+  it("POST /repos/resolve-component returns matched bundle and stores it for retrieval", async () => {
+    const bundleStore = createBundleStore({ ttlMs: 60_000 });
+    const repos = createReposRouter({ bundleStore });
+    const reposApp = new Hono();
+    reposApp.route("/repos", repos);
+
+    const componentSrc = "export const Button = () => null;\n";
+    const storySrc =
+      "import { Button } from './Button';\nexport default { component: Button };\n";
+
+    setFetchImplementation((async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const decoded = decodeURIComponent(url);
+      const inferredPath = decoded.split("/contents/")[1]?.split("?")[0];
+
+      const files: Record<string, string> = {
+        "src/components/Button/Button.tsx": componentSrc,
+        "src/components/Button/Button.stories.tsx": storySrc,
+      };
+
+      if (inferredPath && files[inferredPath]) {
+        return new Response(
+          JSON.stringify({
+            type: "file",
+            encoding: "base64",
+            content: Buffer.from(files[inferredPath]!, "utf8").toString("base64"),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(JSON.stringify({ message: "Not Found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch);
+
+    try {
+      const res = await reposApp.request("/repos/resolve-component", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: "ghp_test",
+          componentName: "Button",
+          vcs: {
+            provider: "github",
+            owner: "acme",
+            repo: "design-system",
+            baseBranch: "main",
+            defaultPrTarget: "main",
+          },
+          syncConfig: {
+            vcs: {
+              provider: "github",
+              owner: "acme",
+              repo: "design-system",
+              baseBranch: "main",
+              defaultPrTarget: "main",
+            },
+            platforms: ["web"],
+            web: {
+              styleSystem: "tailwind",
+              componentPath: "src/components",
+              tokenPaths: ["tailwind.config.ts"],
+              iconPath: "src/icons",
+              exampleComponent: "src/components/Button/Button.tsx",
+            },
+            conventions: {
+              exportStyle: "named",
+              propsPattern: "interface",
+              fileNaming: "PascalCase",
+              testFramework: "vitest",
+              storyFormat: "csf3",
+            },
+          },
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as ResolveComponentResponse;
+      assert.equal(body.matched, true);
+      assert.ok(body.bundleId);
+      assert.equal(body.bundle?.componentName, "Button");
+
+      const filesByRole = (body.bundle?.files ?? []).map((f) => f.role).sort();
+      assert.deepEqual(filesByRole, ["component", "story"]);
+
+      const bundleRes = await reposApp.request(`/repos/bundles/${body.bundleId}`);
+      assert.equal(bundleRes.status, 200);
+      const bundleBody = (await bundleRes.json()) as {
+        bundle: { componentName: string };
+      };
+      assert.equal(bundleBody.bundle.componentName, "Button");
+    } finally {
+      resetFetchImplementation();
+    }
+  });
+
+  it("POST /repos/resolve-component returns matched:false when no files exist", async () => {
+    const repos = createReposRouter();
+    const reposApp = new Hono();
+    reposApp.route("/repos", repos);
+
+    setFetchImplementation((async () =>
+      new Response(JSON.stringify({ message: "Not Found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch);
+
+    try {
+      const res = await reposApp.request("/repos/resolve-component", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: "ghp_test",
+          componentName: "GhostComponent",
+          vcs: {
+            provider: "github",
+            owner: "acme",
+            repo: "design-system",
+            baseBranch: "main",
+            defaultPrTarget: "main",
+          },
+          syncConfig: {
+            vcs: {
+              provider: "github",
+              owner: "acme",
+              repo: "design-system",
+              baseBranch: "main",
+              defaultPrTarget: "main",
+            },
+            platforms: ["web"],
+            web: {
+              styleSystem: "tailwind",
+              componentPath: "src/components",
+              tokenPaths: ["tailwind.config.ts"],
+              iconPath: "src/icons",
+              exampleComponent: "src/components/Button/Button.tsx",
+            },
+            conventions: {
+              exportStyle: "named",
+              propsPattern: "interface",
+              fileNaming: "PascalCase",
+              testFramework: "vitest",
+              storyFormat: "csf3",
+            },
+          },
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as ResolveComponentResponse;
+      assert.equal(body.matched, false);
+      assert.equal(body.bundleId, undefined);
+    } finally {
+      resetFetchImplementation();
+    }
   });
 });

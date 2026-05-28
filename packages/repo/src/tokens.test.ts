@@ -9,6 +9,7 @@ import {
   buildTokenConfig,
   normalizeColorValue,
   replaceArbitraryTailwindColors,
+  replaceArbitraryCssVarClasses,
   tokenCatalogToResolver,
 } from "./tokens.js";
 
@@ -159,5 +160,27 @@ describe("token parser", () => {
     const resolved = replaceArbitraryTailwindColors(source, config.catalog);
     assert.match(resolved, /text-text-primary/);
     assert.doesNotMatch(resolved, /rgb\(27,22,29\)/);
+  });
+
+  it("converts arbitrary css-var tailwind utilities to semantic token classes", () => {
+    const tokenCss = `
+:root {
+  --k-color-button-bg-filled: #000;
+  --k-color-button-bg-filled-hovered: #eee;
+  --k-color-button-bg-filled-disabled: #ccc;
+  --k-color-text-on-brand-disabled: #999;
+}
+`;
+    const source = [
+      'variant: { filled: "bg-[var(--k-color-button-bg-filled)]" }',
+      '"hover:bg-[var(--k-color-button-bg-filled-hovered)]"',
+      '"disabled:bg-[var(--k-color-button-bg-filled-disabled)] disabled:text-[var(--k-color-text-on-brand-disabled)]"',
+    ].join("\n");
+
+    const resolved = replaceArbitraryCssVarClasses(source, tokenCss);
+    assert.match(resolved, /bg-k-color-button-bg-filled/);
+    assert.match(resolved, /hover:bg-k-color-button-bg-filled-hovered/);
+    assert.match(resolved, /disabled:text-k-color-text-on-brand-disabled/);
+    assert.doesNotMatch(resolved, /\[var\(--k-color/);
   });
 });

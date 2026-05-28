@@ -1,5 +1,11 @@
 import { highlightTs, renderLineNumbers } from "./syntax-highlight.js";
 import {
+  extractExistingPreviewMetadata,
+  resolveInitialPreviewArgs,
+  type PreviewPropControl,
+} from "@fig2code/codegen/preview-utils";
+import { inferBreakingFromText, inferFixFromText } from "@fig2code/codegen/change-summary";
+import {
   PREVIEW_ICON_CLOSE,
   PREVIEW_ICON_CODE,
   PREVIEW_ICON_COPY,
@@ -60,8 +66,23 @@ const buildPreviewPreviewPane = document.getElementById("build-preview-preview-p
 const buildPreviewCodePane = document.getElementById("build-preview-code-pane")!;
 const buildPreviewFormatEl = document.getElementById("build-preview-format")!;
 const buildPreviewVariantEl = document.getElementById("build-preview-variant")!;
-const buildPreviewVariantControlsEl = document.getElementById("build-preview-variant-controls")!;
+const buildPreviewSelectControlsEl = document.getElementById("build-preview-select-controls")!;
+const buildPreviewInputControlsEl = document.getElementById("build-preview-input-controls")!;
+const buildPreviewBooleanControlsEl = document.getElementById("build-preview-boolean-controls")!;
+const buildPreviewControlsEl = document.getElementById("build-preview-controls")!;
+const previewSelectGroupEl = document.getElementById("preview-select-group")!;
+const previewInputGroupEl = document.getElementById("preview-input-group")!;
+const previewBooleanGroupEl = document.getElementById("preview-boolean-group")!;
+const buildPreviewCardEl = buildPreviewSection.querySelector(".build-preview-card") as HTMLElement;
+const previewWorkflowEl = document.getElementById("preview-workflow")!;
+const previewActionBarEl = document.getElementById("preview-action-bar")!;
+const toggleAskBtn = document.getElementById("toggle-ask") as HTMLButtonElement;
+const correctionStreamEl = document.getElementById("correction-stream")!;
+const correctionStreamShellEl = document.getElementById("correction-stream-shell")!;
+const previewActionsCountEl = document.getElementById("preview-actions-count")!;
+const previewActionsDetailsEl = document.getElementById("preview-actions-details") as HTMLDetailsElement;
 const buildPreviewFrameEl = document.getElementById("build-preview-frame") as HTMLIFrameElement;
+const buildPreviewVisualEl = document.getElementById("build-preview-visual")!;
 const buildPreviewEmptyEl = document.getElementById("build-preview-empty")!;
 const buildPreviewActionLogEl = document.getElementById("build-preview-action-log")!;
 const buildPreviewFileTreeEl = document.getElementById("build-preview-file-tree")!;
@@ -78,6 +99,11 @@ const copyPreviewFileBtn = document.getElementById("copy-preview-file") as HTMLB
 const buildCorrectionsEl = document.getElementById("build-corrections") as HTMLTextAreaElement;
 const expandPreviewBtn = document.getElementById("expand-preview") as HTMLButtonElement;
 const rebuildWithCorrectionsBtn = document.getElementById("rebuild-with-corrections") as HTMLButtonElement;
+const matchSectionEl = document.getElementById("match-section")!;
+const matchNameEl = document.getElementById("match-name")!;
+const matchReasonEl = document.getElementById("match-reason")!;
+const matchFileListEl = document.getElementById("match-file-list")!;
+const matchSkeletonEl = document.getElementById("match-skeleton")!;
 const previewModalEl = document.getElementById("preview-modal")!;
 const previewModalBackdropEl = document.getElementById("preview-modal-backdrop")!;
 const previewModalMetaEl = document.getElementById("preview-modal-meta")!;
@@ -105,9 +131,14 @@ const closePreviewModalBtn = document.getElementById("close-preview-modal") as H
 
 let currentPreviewUrl: string | null = null;
 let currentPreviewJobId: string | null = null;
-let selectedPreviewVariants: Record<string, string> = {};
+let selectedPreviewArgs: Record<string, unknown> = {};
+let existingPreviewSessionId: string | null = null;
+let correctionStreamTimer: ReturnType<typeof setInterval> | null = null;
+let activeStreamJobId: string | null | "pending" = null;
+let preservePreviewDuringJob = false;
+let askComposerOpen = false;
 
-const PREVIEW_VARIANT_MESSAGE = "fig2code-preview-variants";
+const PREVIEW_ARGS_MESSAGE = "fig2code-preview-args";
 const PREVIEW_READY_MESSAGE = "fig2code-preview-ready";
 const PREVIEW_ACTION_MESSAGE = "fig2code-preview-action";
 
@@ -115,6 +146,7 @@ type PreviewFile = {
   path: string;
   action: "create" | "update" | "delete";
   content?: string;
+  role?: string;
 };
 
 type BuildPreview = {
@@ -126,6 +158,7 @@ type BuildPreview = {
   componentContent?: string;
   variantLabel: string;
   variants?: Record<string, string[]>;
+  propControls?: PreviewPropControl[];
   files?: PreviewFile[];
 };
 
@@ -162,6 +195,16 @@ let hasValidSelection = false;
 let currentSelectionId: string | null = null;
 let lastValidatedSelectionId: string | null = null;
 let currentBuildPreview: BuildPreview | null = null;
+type ResolvedFileRole = "component" | "story" | "test" | "barrel" | "code-connect" | "related";
+type ResolvedBundleSummary = {
+  componentName: string;
+  match: { source: string; confidence: string; reason: string };
+  files: Array<{ path: string; role: ResolvedFileRole; content: string }>;
+};
+type ComponentWorkflowMode = "create" | "update";
+let componentWorkflowMode: ComponentWorkflowMode = "create";
+let currentResolvedBundle: ResolvedBundleSummary | null = null;
+let resolvingMatch = false;
 let previewViewMode: PreviewViewMode = "preview";
 let codeSidebarExpanded = true;
 let selectedPreviewFilePath: string | null = null;
@@ -209,7 +252,121 @@ function syncBuildUiState() {
     currentSelectionId !== null &&
     currentSelectionId === lastValidatedSelectionId;
 
-  pushBtn.classList.toggle("hidden", !isSetupReady() || builtForCurrentSelection);
+  const hasPreview = Boolean(currentBuildPreview);
+  const canBuild =
+    isSetupReady() &&
+    hasValidSelection &&
+    !resolvingMatch &&
+    (!builtForCurrentSelection || componentWorkflowMode === "update");
+
+  buildPreviewSection.classList.toggle(
+    "hidden",
+    !hasPreview && !canBuild && !currentPreviewUrl,
+  );
+  buildPreviewCardEl.classList.toggle("hidden", !hasPreview && !currentPreviewUrl);
+  previewWorkflowEl.classList.toggle("hidden", !hasPreview);
+  syncAskToggleVisibility();
+  if (!hasPreview && askComposerOpen) {
+    setAskComposerOpen(false);
+  }
+
+  buildPreviewSection
+    .querySelector(".build-preview-header")
+    ?.classList.toggle("hidden", !hasPreview && !currentPreviewUrl);
+
+  pushBtn.classList.toggle("hidden", !canBuild);
+  syncPushButtonLabel();
+}
+
+function syncAskToggleVisibility() {
+  const hasPreview = Boolean(currentBuildPreview);
+  toggleAskBtn.hidden = !hasPreview || loading || askComposerOpen;
+}
+
+function setAskComposerOpen(open: boolean) {
+  if (askComposerOpen === open) return;
+  askComposerOpen = open;
+  previewActionBarEl.classList.toggle("is-ask-open", open);
+  syncAskToggleVisibility();
+  if (open) {
+    requestAnimationFrame(() => buildCorrectionsEl.focus());
+  }
+}
+
+function maybeCloseAskComposer() {
+  if (!askComposerOpen || buildCorrectionsEl.value.trim()) return;
+  setAskComposerOpen(false);
+}
+
+function restorePushButtonMarkup() {
+  pushBtn.innerHTML = `<span id="push-label">${escapeHtml(pushBtn.dataset.label ?? "Build component")}</span>`;
+}
+
+function syncPushButtonLabel() {
+  const label = componentWorkflowMode === "update" ? "Update with Figma" : "Build component";
+  pushBtn.dataset.label = label;
+  pushBtn.classList.toggle("is-update", componentWorkflowMode === "update");
+  if (!loading || !pushBtn.classList.contains("is-loading")) {
+    const labelEl = pushBtn.querySelector("#push-label");
+    if (labelEl) labelEl.textContent = label;
+  }
+  rebuildWithCorrectionsBtn.dataset.label = loading ? "…" : "Apply";
+  if (!loading || !rebuildWithCorrectionsBtn.classList.contains("is-loading")) {
+    rebuildWithCorrectionsBtn.textContent = rebuildWithCorrectionsBtn.dataset.label ?? "Apply";
+  }
+}
+
+function setResolvingMatch(active: boolean) {
+  resolvingMatch = active;
+  matchSkeletonEl.classList.toggle("hidden", !active);
+  if (active) {
+    matchSectionEl.classList.add("hidden");
+  }
+  syncBuildUiState();
+  syncDefaultDisabled();
+}
+
+function clearMatchState() {
+  componentWorkflowMode = "create";
+  currentResolvedBundle = null;
+  matchSectionEl.classList.add("hidden");
+  matchFileListEl.innerHTML = "";
+  matchNameEl.textContent = "";
+  matchReasonEl.textContent = "";
+  hideBuildProgress();
+  syncPushButtonLabel();
+}
+
+function showBuildProgress(componentName: string) {
+  let el = document.getElementById("build-progress-indicator");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "build-progress-indicator";
+    el.className = "build-progress-indicator";
+    matchSectionEl.parentElement?.insertBefore(el, matchSectionEl.nextSibling);
+  }
+  el.innerHTML = `
+    <div class="build-progress-bar"><div class="build-progress-fill"></div></div>
+    <span class="build-progress-text">Building ${escapeHtml(componentName)} preview…</span>
+  `;
+  el.classList.remove("hidden");
+}
+
+function hideBuildProgress() {
+  const el = document.getElementById("build-progress-indicator");
+  if (el) el.classList.add("hidden");
+}
+
+function renderResolvedBundle(bundle: ResolvedBundleSummary) {
+  matchNameEl.textContent = bundle.componentName;
+  matchReasonEl.textContent = bundle.match.reason ?? "";
+  matchFileListEl.innerHTML = bundle.files
+    .map(
+      (file) =>
+        `<li><span class="file-role">${escapeHtml(file.role)}</span><span>${escapeHtml(file.path)}</span></li>`,
+    )
+    .join("");
+  matchSectionEl.classList.remove("hidden");
 }
 
 function syncMainScreenLayout(options: { summary?: string; correctedAt?: string; connection?: ConnectionPayload } = {}) {
@@ -244,14 +401,95 @@ function syncDefaultDisabled() {
   saveLlmBtn.disabled = busy || !onMain;
   disconnectBtn.disabled = busy || !onMain;
   pushBtn.disabled =
-    busy || !onMain || !isSetupReady() || !llmConfigured || !hasValidSelection;
+    busy ||
+    !onMain ||
+    !isSetupReady() ||
+    !llmConfigured ||
+    !hasValidSelection ||
+    resolvingMatch;
   rebuildWithCorrectionsBtn.disabled =
     busy || !onMain || !isSetupReady() || !llmConfigured || !currentBuildPreview;
+  toggleAskBtn.disabled = busy || !onMain || !currentBuildPreview;
+  syncAskToggleVisibility();
   expandPreviewBtn.disabled = busy || !currentPreviewUrl;
 }
 
 function buildPreviewUrl(jobId: string): string {
   return `${apiBase}/jobs/${jobId}/preview`;
+}
+
+function prepareExistingPreview(bundle: ResolvedBundleSummary): void {
+  if (existingPreviewSessionId) {
+    fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}`, {
+      method: "DELETE",
+    }).catch(() => {});
+    existingPreviewSessionId = null;
+  }
+
+  const componentFile = bundle.files.find((f) => f.role === "component");
+  const storyFile = bundle.files.find((f) => f.role === "story");
+  const previewMetadata = componentFile?.content
+    ? extractExistingPreviewMetadata(
+        componentFile.content,
+        storyFile?.content,
+      )
+    : { variants: {}, variantLabel: "Current", propControls: [] };
+
+  const preview: BuildPreview = {
+    componentName: bundle.componentName,
+    storyFormat: storyFile ? "csf3" : "none",
+    storyPath: storyFile?.path,
+    storyContent: storyFile?.content,
+    componentPath: componentFile?.path,
+    componentContent: componentFile?.content,
+    variantLabel: previewMetadata.variantLabel,
+    variants: previewMetadata.variants,
+    propControls: previewMetadata.propControls,
+    files: bundle.files.map((f) => ({
+      path: f.path,
+      action: "update" as const,
+      content: f.content,
+      role: f.role,
+    })),
+  };
+
+  editedFiles.clear();
+  currentBuildPreview = preview;
+  currentPreviewJobId = null;
+  currentPreviewUrl = null;
+  selectedPreviewFilePath = null;
+  selectedPreviewFileContent = "";
+  clearPreviewActionLogs();
+  refreshCodeExplorers();
+  renderPreviewControls(preview);
+
+  // Preview section stays hidden — only shown when Vite is ready
+  buildPreviewSection.classList.add("hidden");
+}
+
+function revealExistingPreview(sessionId: string, proxyUrl: string): void {
+  existingPreviewSessionId = sessionId;
+  currentPreviewJobId = sessionId;
+  currentPreviewUrl = proxyUrl;
+
+  if (currentBuildPreview) {
+    renderPreviewControls(currentBuildPreview);
+  }
+  buildPreviewFormatEl.textContent = "Existing component";
+
+  buildPreviewFrameEl.onload = () => {
+    postPreviewArgsToFrame(buildPreviewFrameEl);
+  };
+  buildPreviewFrameEl.src = proxyUrl;
+  buildPreviewFrameEl.classList.remove("hidden");
+  buildPreviewEmptyEl.classList.add("hidden");
+
+  setPreviewViewMode("preview");
+  buildPreviewSection.classList.remove("hidden");
+  buildPreviewCardEl.classList.remove("hidden");
+  previewWorkflowEl.classList.remove("hidden");
+  syncBuildUiState();
+  syncDefaultDisabled();
 }
 
 function previewMessageOrigin(): string {
@@ -290,18 +528,28 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
-function fileActionBadge(action: PreviewFile["action"]): string {
-  switch (action) {
-    case "create":
-      return "C";
-    case "update":
-      return "U";
-    case "delete":
-      return "D";
+function fileActionBadge(file: PreviewFile): string {
+  if (file.role) {
+    switch (file.role) {
+      case "component": return "TSX";
+      case "story": return "Story";
+      case "test": return "Test";
+      case "barrel": return "Idx";
+      case "code-connect": return "CC";
+      case "related": return "Rel";
+      default: return file.role.slice(0, 3).toUpperCase();
+    }
+  }
+  switch (file.action) {
+    case "create": return "C";
+    case "update": return "U";
+    case "delete": return "D";
   }
 }
 
 function defaultPreviewFilePath(preview: BuildPreview, files: PreviewFile[]): string | null {
+  const componentByRole = files.find((f) => f.role === "component");
+  if (componentByRole) return componentByRole.path;
   if (preview.componentPath && files.some((file) => file.path === preview.componentPath)) {
     return preview.componentPath;
   }
@@ -312,6 +560,18 @@ function defaultPreviewFilePath(preview: BuildPreview, files: PreviewFile[]): st
 }
 
 function describeSelectedFileStatus(file: PreviewFile, preview: BuildPreview): string {
+  if (file.role) {
+    switch (file.role) {
+      case "component": return "Component";
+      case "story": return "Story";
+      case "test": return "Test";
+      case "barrel": return "Index / barrel";
+      case "code-connect": return "Code Connect";
+      case "related": return "Related module";
+      default: return file.role;
+    }
+  }
+
   const isComponentFile =
     file.path === preview.componentPath ||
     basename(file.path).replace(/\.(tsx|jsx)$/, "") === preview.componentName;
@@ -328,6 +588,7 @@ function describeSelectedFileStatus(file: PreviewFile, preview: BuildPreview): s
 }
 
 function statusClassForFile(file: PreviewFile, preview: BuildPreview): string {
+  if (file.role) return "existing";
   const label = describeSelectedFileStatus(file, preview);
   if (label.startsWith("Existing")) return "existing";
   if (label.startsWith("New")) return "new";
@@ -349,6 +610,11 @@ function renderPreviewActionLogs() {
 
   buildPreviewActionLogEl.innerHTML = markup;
   previewModalActionLogEl.innerHTML = markup;
+
+  if (previewActionsCountEl) {
+    previewActionsCountEl.textContent =
+      previewActionLog.length > 0 ? String(previewActionLog.length) : "";
+  }
 }
 
 function clearPreviewActionLogs() {
@@ -362,6 +628,9 @@ function appendPreviewAction(entry: PreviewActionEntry) {
     previewActionLog = previewActionLog.slice(0, 20);
   }
   renderPreviewActionLogs();
+  if (previewActionsDetailsEl && previewActionLog.length > 0) {
+    previewActionsDetailsEl.open = true;
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -436,7 +705,8 @@ function renderCodeExplorer(explorer: CodeExplorerElements, preview: BuildPrevie
     button.title = `${file.path} (${file.action})`;
     button.dataset.filePath = file.path;
     const dotHtml = editedFiles.has(file.path) ? '<span class="file-edited-dot"></span>' : '';
-    button.innerHTML = `<span class="file-badge-wrapper"><span class="file-badge ${file.action}">${fileActionBadge(file.action)}</span>${dotHtml}</span><span class="file-name">${escapeHtml(basename(file.path))}</span>`;
+    const badgeClass = file.role ?? file.action;
+    button.innerHTML = `<span class="file-badge-wrapper"><span class="file-badge ${badgeClass}">${fileActionBadge(file)}</span>${dotHtml}</span><span class="file-name">${escapeHtml(basename(file.path))}</span>`;
     button.onclick = () => {
       flushCurrentEdit();
       selectedPreviewFilePath = file.path;
@@ -609,16 +879,18 @@ function shouldHotReloadPreview(filePath: string | null): boolean {
 function hotReloadPreview() {
   if (!currentBuildPreview) return;
   if (!shouldHotReloadPreview(selectedPreviewFilePath)) return;
+  if (!currentPreviewJobId) return;
   const raw = getComponentSourceForPreview();
   if (!raw.trim()) return;
-  const message = {
-    type: "fig2code-preview-hot-reload",
-    componentSource: raw,
-    componentName: currentBuildPreview.componentName,
-  };
-  const origin = previewMessageOrigin();
-  try { buildPreviewFrameEl.contentWindow?.postMessage(message, origin); } catch {}
-  try { previewModalFrameEl.contentWindow?.postMessage(message, origin); } catch {}
+
+  const filePath = selectedPreviewFilePath ?? currentBuildPreview.componentPath ?? "";
+  if (!filePath) return;
+
+  fetch(`${apiBase}/jobs/${currentPreviewJobId}/preview/files`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: filePath, content: raw }),
+  }).catch(() => {});
 }
 
 function handleCodeEditorInput(source: CodeExplorerElements) {
@@ -712,15 +984,15 @@ function setupCodeEditorEvents(explorer: CodeExplorerElements) {
   });
 }
 
-function postPreviewVariantsToFrame(frame: HTMLIFrameElement) {
+function postPreviewArgsToFrame(frame: HTMLIFrameElement) {
   if (!frame.src || frame.classList.contains("hidden")) {
     return;
   }
 
   frame.contentWindow?.postMessage(
     {
-      type: PREVIEW_VARIANT_MESSAGE,
-      variants: selectedPreviewVariants,
+      type: PREVIEW_ARGS_MESSAGE,
+      args: selectedPreviewArgs,
     },
     previewMessageOrigin(),
   );
@@ -730,61 +1002,182 @@ function formatVariantAxisLabel(key: string): string {
   return key.charAt(0).toUpperCase() + key.slice(1);
 }
 
-function formatSelectedVariantLabel(variants: Record<string, string>): string {
-  return Object.entries(variants)
-    .map(([key, value]) => `${key}=${value}`)
+function formatSelectedVariantLabel(preview: BuildPreview): string {
+  const axes = preview.variants ?? {};
+  if (Object.keys(axes).length === 0) {
+    return preview.variantLabel;
+  }
+  return Object.keys(axes)
+    .map((key) => {
+      const value = selectedPreviewArgs[key];
+      const fallback = axes[key]?.[0] ?? "?";
+      return `${key}=${typeof value === "string" ? value : fallback}`;
+    })
     .join(", ");
 }
 
-function renderVariantControls(preview: BuildPreview) {
-  buildPreviewVariantControlsEl.innerHTML = "";
-  selectedPreviewVariants = {};
+function appendPreviewSelectControl(
+  container: HTMLElement,
+  name: string,
+  options: string[],
+  value: string,
+  onChange: (next: string) => void,
+) {
+  const field = document.createElement("label");
+  field.className = "build-preview-variant-field";
 
-  const axes = preview.variants;
-  if (!axes || Object.keys(axes).length === 0) {
-    buildPreviewVariantControlsEl.classList.add("hidden");
-    buildPreviewVariantEl.classList.remove("hidden");
+  const label = document.createElement("span");
+  label.textContent = formatVariantAxisLabel(name);
+
+  const select = document.createElement("select");
+  select.dataset.previewArgKey = name;
+  for (const optionValue of options) {
+    const option = document.createElement("option");
+    option.value = optionValue;
+    option.textContent = optionValue;
+    select.appendChild(option);
+  }
+  select.value = value;
+  select.onchange = () => onChange(select.value);
+
+  field.append(label, select);
+  container.appendChild(field);
+}
+
+function appendPreviewBooleanControl(
+  container: HTMLElement,
+  name: string,
+) {
+  const field = document.createElement("label");
+  field.className = "build-preview-variant-field build-preview-boolean-field";
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = Boolean(selectedPreviewArgs[name]);
+  input.onchange = () => {
+    selectedPreviewArgs[name] = input.checked;
+    refreshPreviewFrames();
+  };
+
+  const label = document.createElement("span");
+  label.textContent = formatVariantAxisLabel(name);
+
+  field.append(input, label);
+  container.appendChild(field);
+}
+
+function appendPreviewInputControl(
+  container: HTMLElement,
+  name: string,
+  controlType: "text" | "number",
+) {
+  const field = document.createElement("label");
+  field.className = "build-preview-variant-field";
+
+  const label = document.createElement("span");
+  label.textContent = formatVariantAxisLabel(name);
+
+  const input = document.createElement("input");
+  input.type = controlType;
+  input.dataset.previewArgKey = name;
+  input.value = String(selectedPreviewArgs[name] ?? "");
+  input.onchange = () => {
+    if (controlType === "number") {
+      const parsed = Number(input.value);
+      selectedPreviewArgs[name] = Number.isFinite(parsed) ? parsed : input.value;
+    } else {
+      selectedPreviewArgs[name] = input.value;
+    }
+    refreshPreviewFrames();
+  };
+
+  field.append(label, input);
+  container.appendChild(field);
+}
+
+function renderPreviewControls(preview: BuildPreview) {
+  buildPreviewSelectControlsEl.innerHTML = "";
+  buildPreviewInputControlsEl.innerHTML = "";
+  buildPreviewBooleanControlsEl.innerHTML = "";
+  selectedPreviewArgs = {};
+
+  const axes = preview.variants ?? {};
+  const propControls = preview.propControls ?? [];
+  const hasAnyControls = Object.keys(axes).length > 0 || propControls.length > 0;
+
+  buildPreviewControlsEl.classList.toggle("hidden", !hasAnyControls);
+  buildPreviewVariantEl.classList.toggle("hidden", hasAnyControls);
+  if (!hasAnyControls) {
     buildPreviewVariantEl.textContent = preview.variantLabel;
+    previewSelectGroupEl.classList.add("hidden");
+    previewInputGroupEl.classList.add("hidden");
+    previewBooleanGroupEl.classList.add("hidden");
     return;
   }
 
-  buildPreviewVariantControlsEl.classList.remove("hidden");
-  buildPreviewVariantEl.classList.add("hidden");
+  selectedPreviewArgs = resolveInitialPreviewArgs(
+    axes,
+    propControls,
+    preview.componentContent,
+    preview.storyContent,
+  );
+
+  let selectCount = 0;
+  let inputCount = 0;
+  let booleanCount = 0;
 
   for (const [key, values] of Object.entries(axes)) {
-    const initialValue = values[0] ?? "";
-    selectedPreviewVariants[key] = initialValue;
-
-    const field = document.createElement("label");
-    field.className = "build-preview-variant-field";
-
-    const label = document.createElement("span");
-    label.textContent = formatVariantAxisLabel(key);
-
-    const select = document.createElement("select");
-    select.dataset.variantKey = key;
-    for (const value of values) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.appendChild(option);
-    }
-    select.value = initialValue;
-    select.onchange = () => {
-      selectedPreviewVariants[key] = select.value;
-      refreshPreviewFrames();
-    };
-
-    field.append(label, select);
-    buildPreviewVariantControlsEl.appendChild(field);
+    const initialValue = String(selectedPreviewArgs[key] ?? values[0] ?? "");
+    selectedPreviewArgs[key] = initialValue;
+    appendPreviewSelectControl(
+      buildPreviewSelectControlsEl,
+      key,
+      values,
+      initialValue,
+      (next) => {
+        selectedPreviewArgs[key] = next;
+        refreshPreviewFrames();
+      },
+    );
+    selectCount++;
   }
+
+  for (const control of propControls) {
+    if (control.control === "boolean") {
+      appendPreviewBooleanControl(buildPreviewBooleanControlsEl, control.name);
+      booleanCount++;
+    } else if (control.control === "select" && control.options?.length) {
+      appendPreviewSelectControl(
+        buildPreviewSelectControlsEl,
+        control.name,
+        control.options,
+        String(selectedPreviewArgs[control.name] ?? control.options[0] ?? ""),
+        (next) => {
+          selectedPreviewArgs[control.name] = next;
+          refreshPreviewFrames();
+        },
+      );
+      selectCount++;
+    } else {
+      appendPreviewInputControl(
+        buildPreviewInputControlsEl,
+        control.name,
+        control.control === "number" ? "number" : "text",
+      );
+      inputCount++;
+    }
+  }
+
+  previewSelectGroupEl.classList.toggle("hidden", selectCount === 0);
+  previewInputGroupEl.classList.toggle("hidden", inputCount === 0);
+  previewBooleanGroupEl.classList.toggle("hidden", booleanCount === 0);
 }
 
 function refreshPreviewFrames() {
   if (!currentPreviewJobId) return;
 
-  postPreviewVariantsToFrame(buildPreviewFrameEl);
-  postPreviewVariantsToFrame(previewModalFrameEl);
+  postPreviewArgsToFrame(buildPreviewFrameEl);
+  postPreviewArgsToFrame(previewModalFrameEl);
 
   if (!previewModalEl.classList.contains("hidden") && currentBuildPreview) {
     renderBuildPreviewMeta(previewModalMetaEl, currentBuildPreview);
@@ -797,7 +1190,7 @@ function setPreviewFrame(frame: HTMLIFrameElement, emptyEl: HTMLElement, preview
   if (previewUrl) {
     const needsReload = frame.getAttribute("src") !== previewUrl;
     frame.onload = () => {
-      postPreviewVariantsToFrame(frame);
+      postPreviewArgsToFrame(frame);
     };
 
     frame.classList.remove("hidden");
@@ -808,7 +1201,7 @@ function setPreviewFrame(frame: HTMLIFrameElement, emptyEl: HTMLElement, preview
       return;
     }
 
-    postPreviewVariantsToFrame(frame);
+    postPreviewArgsToFrame(frame);
     return;
   }
 
@@ -829,10 +1222,7 @@ function storyFormatLabel(format: BuildPreview["storyFormat"]): string {
 }
 
 function renderBuildPreviewMeta(container: HTMLElement, preview: BuildPreview) {
-  const variantLabel =
-    Object.keys(selectedPreviewVariants).length > 0
-      ? formatSelectedVariantLabel(selectedPreviewVariants)
-      : preview.variantLabel;
+  const variantLabel = formatSelectedVariantLabel(preview);
 
   container.innerHTML = `
     <div class="build-preview-meta">
@@ -850,13 +1240,20 @@ function clearValidatedBuildState() {
 }
 
 function showBuildPreview(preview: BuildPreview, jobId: string) {
+  // Clean up existing component preview if we're now showing a codegen result
+  if (existingPreviewSessionId) {
+    fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}`, {
+      method: "DELETE",
+    }).catch(() => {});
+    existingPreviewSessionId = null;
+  }
   editedFiles.clear();
   currentBuildPreview = preview;
   currentPreviewJobId = jobId;
   selectedPreviewFilePath = null;
   selectedPreviewFileContent = "";
   clearPreviewActionLogs();
-  renderVariantControls(preview);
+  renderPreviewControls(preview);
   currentPreviewUrl = buildPreviewUrl(jobId);
   buildPreviewFormatEl.textContent = storyFormatLabel(preview.storyFormat);
   setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, currentPreviewUrl);
@@ -867,22 +1264,41 @@ function showBuildPreview(preview: BuildPreview, jobId: string) {
   syncDefaultDisabled();
 }
 
-function hideBuildPreview() {
+function hideBuildPreview(resetWorkflow = true) {
+  if (existingPreviewSessionId) {
+    fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}`, {
+      method: "DELETE",
+    }).catch(() => {});
+    existingPreviewSessionId = null;
+  }
+  hideBuildProgress();
+
   editedFiles.clear();
   currentBuildPreview = null;
   currentPreviewJobId = null;
-  selectedPreviewVariants = {};
+  selectedPreviewArgs = {};
   selectedPreviewFilePath = null;
   selectedPreviewFileContent = "";
   currentPreviewUrl = null;
   previewActionLog = [];
-  buildPreviewVariantControlsEl.innerHTML = "";
-  buildPreviewVariantControlsEl.classList.add("hidden");
+  buildPreviewSelectControlsEl.innerHTML = "";
+  buildPreviewInputControlsEl.innerHTML = "";
+  buildPreviewBooleanControlsEl.innerHTML = "";
+  buildPreviewControlsEl.classList.add("hidden");
+  previewSelectGroupEl.classList.add("hidden");
+  previewInputGroupEl.classList.add("hidden");
+  previewBooleanGroupEl.classList.add("hidden");
   buildPreviewVariantEl.classList.remove("hidden");
   setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, null);
-  buildPreviewSection.classList.add("hidden");
+  if (resetWorkflow) {
+    buildPreviewSection.classList.add("hidden");
+    previewWorkflowEl.classList.add("hidden");
+    setAskComposerOpen(false);
+    clearCorrectionStream();
+  }
   setPreviewViewMode("preview");
   closePreviewModal();
+  syncBuildUiState();
   syncDefaultDisabled();
 }
 
@@ -908,7 +1324,19 @@ function closePreviewModal() {
   parent.postMessage({ pluginMessage: { type: "resize-ui", width: 380, height: 720 } }, "*");
 }
 
-function startBuild(corrections?: string, triggerBtn: HTMLButtonElement = pushBtn) {
+function shouldPreservePreviewForBuild(options?: { preservePreview?: boolean }): boolean {
+  if (options?.preservePreview) return true;
+  return Boolean(
+    currentBuildPreview &&
+      (currentPreviewUrl || existingPreviewSessionId),
+  );
+}
+
+function startBuild(
+  corrections?: string,
+  triggerBtn: HTMLButtonElement = pushBtn,
+  options?: { preservePreview?: boolean; isCorrection?: boolean },
+) {
   if (!llmConfigured) {
     statusEl.textContent = "Save LLM settings before pushing.";
     editingLlm = true;
@@ -920,7 +1348,27 @@ function startBuild(corrections?: string, triggerBtn: HTMLButtonElement = pushBt
     return;
   }
 
-  hideBuildPreview();
+  const preservePreview = shouldPreservePreviewForBuild(options);
+  preservePreviewDuringJob = preservePreview;
+
+  if (!options?.isCorrection) {
+    setAskComposerOpen(false);
+  }
+
+  if (!preservePreview) {
+    hideBuildPreview();
+  } else {
+    flushCurrentEdit();
+    setPreviewBusy(true);
+    const streamPrompt = corrections?.trim()
+      ? corrections.trim()
+      : componentWorkflowMode === "update"
+        ? "Update with Figma"
+        : "Rebuild";
+    startJobActivityStream(streamPrompt);
+    activeStreamJobId = "pending";
+  }
+
   beginLoading(triggerBtn);
   parent.postMessage(
     {
@@ -930,9 +1378,320 @@ function startBuild(corrections?: string, triggerBtn: HTMLButtonElement = pushBt
         modelId: pushModelEl.value,
         provider: providerFromModelId(pushModelEl.value),
         corrections: corrections?.trim() ?? "",
+        ...(preservePreview ? { previewFileOverrides: collectPreviewFileOverrides() } : {}),
       },
     },
     "*",
+  );
+}
+
+function collectPreviewFileOverrides(): Array<{ path: string; role: string; content: string }> {
+  if (!currentBuildPreview) return [];
+  flushCurrentEdit();
+  const files = getPreviewFiles(currentBuildPreview).filter((file) => file.content?.trim());
+  return files.map((file) => ({
+    path: file.path,
+    role: file.role ?? inferPreviewFileRole(file, currentBuildPreview!),
+    content: file.content ?? "",
+  }));
+}
+
+function inferPreviewFileRole(file: PreviewFile, preview: BuildPreview): string {
+  if (file.role) return file.role;
+  if (file.path === preview.storyPath || /\.stories\.(tsx|jsx|ts|js)$/i.test(file.path)) {
+    return "story";
+  }
+  if (file.path === preview.componentPath) return "component";
+  return "related";
+}
+
+function clearCorrectionStream() {
+  if (correctionStreamTimer) {
+    clearInterval(correctionStreamTimer);
+    correctionStreamTimer = null;
+  }
+  activeStreamJobId = null;
+  preservePreviewDuringJob = false;
+  correctionStreamEl.innerHTML = "";
+  setPreviewBusy(false);
+}
+
+function setPreviewBusy(busy: boolean) {
+  buildPreviewVisualEl?.classList.toggle("is-busy", busy);
+}
+
+function startJobActivityStream(prompt: string) {
+  if (correctionStreamTimer) {
+    clearInterval(correctionStreamTimer);
+    correctionStreamTimer = null;
+  }
+  correctionStreamEl.innerHTML = "";
+  preservePreviewDuringJob = true;
+  previewWorkflowEl.classList.remove("hidden");
+
+  const line = document.createElement("p");
+  line.className = "correction-stream-line is-active";
+  line.textContent = prompt.startsWith("Update") ? prompt : `You: ${prompt}`;
+  correctionStreamEl.appendChild(line);
+
+  const status = document.createElement("p");
+  status.className = "correction-stream-line is-active";
+  status.dataset.streamStatus = "true";
+  status.innerHTML = 'Reading code<span class="correction-stream-cursor"></span>';
+  correctionStreamEl.appendChild(status);
+  correctionStreamEl.scrollTop = correctionStreamEl.scrollHeight;
+  setPreviewBusy(true);
+  syncCorrectionStreamFade();
+
+  const phases = [
+    "Reading code",
+    "Planning edit",
+    "Updating component",
+    "Validating output",
+  ];
+  let phaseIndex = 0;
+  correctionStreamTimer = setInterval(() => {
+    phaseIndex = (phaseIndex + 1) % phases.length;
+    status.innerHTML = `${phases[phaseIndex]}<span class="correction-stream-cursor"></span>`;
+  }, 2200);
+}
+
+function formatSummaryAsListItems(summary: string): string[] {
+  const text = summary.trim();
+  if (!text) return [];
+
+  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    const bulletLines = lines.map((line) =>
+      line.replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, "").trim(),
+    );
+    if (bulletLines.every(Boolean)) {
+      return bulletLines;
+    }
+  }
+
+  const verbSplit = text
+    .split(
+      /\s+(?=(?:Added|Updated|Removed|Fixed|Changed|Renamed|Introduced|Replaced|Set|Moved|Adjusted|Counter|All|Deprecated|Aligned|Kept|Extended|Refactored|Normalized|Simplified)\b)/i,
+    )
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (verbSplit.length > 1) {
+    return verbSplit;
+  }
+
+  if (text.includes(";")) {
+    const parts = text
+      .split(/;\s*/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (parts.length > 1) {
+      return parts.map((part) =>
+        /[.!?]$/.test(part) ? part : `${part.replace(/[.,]$/, "")}.`,
+      );
+    }
+  }
+
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  if (sentences.length > 1) {
+    return sentences;
+  }
+
+  return [text];
+}
+
+type ChangeListItem = {
+  text: string;
+  breaking: boolean;
+  fix?: string;
+};
+
+type CodegenChangeSummary = {
+  hasBreakingChanges: boolean;
+  changes: ChangeListItem[];
+};
+
+function parseChangeListItems(
+  summary: string,
+  changeSummary?: CodegenChangeSummary | null,
+): ChangeListItem[] {
+  if (changeSummary?.changes?.length) {
+    return changeSummary.changes
+      .filter((item) => item.text.trim())
+      .map((item) => {
+        const breaking = item.breaking || inferBreakingFromText(item.text);
+        return {
+          text: item.text,
+          breaking,
+          fix: breaking ? item.fix?.trim() || inferFixFromText(item.text) : undefined,
+        };
+      });
+  }
+
+  return formatSummaryAsListItems(summary).map((line) => {
+    const breaking = /^\[breaking\]\s*/i.test(line);
+    const nonBreaking = /^\[(non-breaking|nonbreaking)\]\s*/i.test(line);
+    const text = line
+      .replace(/^\[breaking\]\s*/i, "")
+      .replace(/^\[(non-breaking|nonbreaking)\]\s*/i, "")
+      .trim();
+    const explicitBreaking = breaking && !nonBreaking;
+    const isBreaking = explicitBreaking || inferBreakingFromText(text);
+    return {
+      text,
+      breaking: isBreaking,
+      fix: isBreaking ? inferFixFromText(text) : undefined,
+    };
+  });
+}
+
+function syncCorrectionStreamFade() {
+  const shell = correctionStreamShellEl;
+  const stream = correctionStreamEl;
+  if (!shell || !stream) return;
+
+  const hasOverflow = stream.scrollHeight > stream.clientHeight + 2;
+  const notAtBottom = stream.scrollTop + stream.clientHeight < stream.scrollHeight - 2;
+  shell.classList.toggle("is-scrollable", hasOverflow && notAtBottom);
+}
+
+function appendBreakingChangeItem(list: HTMLElement, entry: ChangeListItem) {
+  const item = document.createElement("li");
+  item.className = "correction-summary-item is-breaking";
+
+  const issue = document.createElement("span");
+  issue.className = "correction-summary-issue";
+  issue.textContent = entry.text;
+  item.appendChild(issue);
+
+  if (entry.fix) {
+    const fix = document.createElement("span");
+    fix.className = "correction-summary-fix";
+    const label = document.createElement("span");
+    label.className = "correction-summary-fix-label";
+    label.textContent = "Fix: ";
+    fix.append(label, document.createTextNode(entry.fix));
+    item.appendChild(fix);
+  }
+
+  list.appendChild(item);
+  return item;
+}
+
+function finishJobActivityStream(
+  summary: string,
+  failed = false,
+  changeSummary?: CodegenChangeSummary | null,
+) {
+  if (correctionStreamTimer) {
+    clearInterval(correctionStreamTimer);
+    correctionStreamTimer = null;
+  }
+  setPreviewBusy(false);
+
+  const status = correctionStreamEl.querySelector("[data-stream-status='true']");
+  status?.remove();
+
+  for (const line of Array.from(
+    correctionStreamEl.querySelectorAll(".correction-stream-line.is-active"),
+  )) {
+    line.classList.remove("is-active");
+    line.classList.add("is-faded");
+  }
+
+  const items: ChangeListItem[] = failed
+    ? [{ text: summary.trim() || "Update failed.", breaking: false }]
+    : parseChangeListItems(summary || "Done.", changeSummary);
+
+  const block = document.createElement("div");
+  block.className = `correction-summary${failed ? " is-error" : ""}`;
+
+  if (!failed && (changeSummary || items.some((item) => item.breaking))) {
+    const hasBreaking = items.some((item) => item.breaking);
+    const banner = document.createElement("p");
+    banner.className = hasBreaking
+      ? "correction-change-banner is-breaking"
+      : "correction-change-banner is-safe";
+    banner.textContent = hasBreaking
+      ? "Includes breaking changes — review before shipping"
+      : "No API-breaking changes detected";
+    block.appendChild(banner);
+  }
+
+  const heading = document.createElement("p");
+  heading.className = "correction-summary-heading";
+  heading.textContent = failed ? "Error" : "Changes";
+  block.appendChild(heading);
+
+  const list = document.createElement("ul");
+  list.className = "correction-summary-list";
+  block.appendChild(list);
+  correctionStreamEl.appendChild(block);
+
+  let itemIndex = 0;
+  const revealNext = () => {
+    if (itemIndex >= items.length) {
+      preservePreviewDuringJob = false;
+      activeStreamJobId = null;
+      return;
+    }
+
+    const entry = items[itemIndex]!;
+    const item = entry.breaking
+      ? appendBreakingChangeItem(list, entry)
+      : (() => {
+          const el = document.createElement("li");
+          el.className = "correction-summary-item";
+          el.textContent = entry.text;
+          list.appendChild(el);
+          return el;
+        })();
+    correctionStreamEl.scrollTop = correctionStreamEl.scrollHeight;
+    requestAnimationFrame(() => {
+      item.classList.add("is-visible");
+      syncCorrectionStreamFade();
+    });
+
+    itemIndex += 1;
+    window.setTimeout(revealNext, 90);
+  };
+  revealNext();
+  syncCorrectionStreamFade();
+}
+
+function handleJobStatusForActivityStream(job: {
+  id: string;
+  status: string;
+  error?: string;
+  codegenSummary?: string;
+  changeSummary?: CodegenChangeSummary;
+}) {
+  const hasStream =
+    activeStreamJobId === job.id ||
+    activeStreamJobId === "pending" ||
+    Boolean(correctionStreamEl.querySelector("[data-stream-status='true']"));
+
+  if (!hasStream) return;
+
+  if (job.status === "validated") {
+    finishJobActivityStream(
+      job.codegenSummary ?? "Update complete.",
+      false,
+      job.changeSummary ?? null,
+    );
+  } else if (job.status === "failed" || job.status === "needs_manual_fix") {
+    finishJobActivityStream(job.error ?? "Update failed.", true);
+  }
+}
+
+function isPreservedPreviewJob(jobId: string): boolean {
+  return (
+    preservePreviewDuringJob ||
+    activeStreamJobId === jobId ||
+    activeStreamJobId === "pending"
   );
 }
 
@@ -971,6 +1730,7 @@ function beginLoading(btn: HTMLButtonElement) {
       b.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
     }
   }
+  syncAskToggleVisibility();
 }
 
 function endLoading() {
@@ -979,8 +1739,13 @@ function endLoading() {
   for (const b of actionButtons) {
     b.classList.remove("is-loading");
     b.removeAttribute("aria-busy");
-    b.textContent = b.dataset.label ?? "";
+    if (b === pushBtn) {
+      restorePushButtonMarkup();
+    } else {
+      b.textContent = b.dataset.label ?? "";
+    }
   }
+  syncPushButtonLabel();
   syncDefaultDisabled();
 }
 
@@ -1253,6 +2018,8 @@ function showDisconnected() {
   editingLlm = false;
   currentSelectionId = null;
   lastValidatedSelectionId = null;
+  setResolvingMatch(false);
+  clearMatchState();
   hideBuildPreview();
   buildCorrectionsEl.value = "";
   llmTokenEl.value = "";
@@ -1422,17 +2189,52 @@ previewModalBackdropEl.onclick = () => {
 };
 
 rebuildWithCorrectionsBtn.onclick = () => {
+  submitCorrection();
+};
+
+toggleAskBtn.onclick = () => {
+  setAskComposerOpen(true);
+};
+
+buildCorrectionsEl.addEventListener("blur", () => {
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    if (active && previewActionBarEl.contains(active)) return;
+    maybeCloseAskComposer();
+  }, 150);
+});
+
+buildCorrectionsEl.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && askComposerOpen) {
+    event.preventDefault();
+    buildCorrectionsEl.value = "";
+    setAskComposerOpen(false);
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    submitCorrection();
+  }
+});
+
+function submitCorrection() {
   const corrections = buildCorrectionsEl.value.trim();
   if (!corrections) {
-    statusEl.textContent = "Add corrections before rebuilding.";
+    statusEl.textContent = "Describe the change you want.";
     return;
   }
   if (!currentBuildPreview) {
-    statusEl.textContent = "Build a component first.";
+    statusEl.textContent = "Open a preview before applying corrections.";
     return;
   }
-  startBuild(corrections, rebuildWithCorrectionsBtn);
-};
+  activeStreamJobId = "pending";
+  startBuild(corrections, rebuildWithCorrectionsBtn, {
+    preservePreview: true,
+    isCorrection: true,
+  });
+  buildCorrectionsEl.value = "";
+  setAskComposerOpen(false);
+}
 
 disconnectBtn.onclick = () => {
   beginLoading(disconnectBtn);
@@ -1452,6 +2254,7 @@ function formatJobStatus(job: {
   prUrl?: string;
   error?: string;
   codegenSummary?: string;
+  changeSummary?: CodegenChangeSummary;
   patchCount?: number;
   buildPreview?: BuildPreview;
 }): string {
@@ -1465,10 +2268,24 @@ function formatJobStatus(job: {
     if (job.patchCount !== undefined) {
       lines.push(`Patches: ${job.patchCount}`);
     }
-    lines.push(
-      "",
-      job.codegenSummary ?? "Codegen complete — workspace apply and PR ship in M5–M6.",
-    );
+    const summary =
+      job.codegenSummary ?? "Codegen complete — workspace apply and PR ship in M5–M6.";
+    if (job.changeSummary) {
+      const hasBreaking = job.changeSummary.changes.some((item) => item.breaking);
+      lines.push(
+        "",
+        hasBreaking ? "Includes breaking changes:" : "No API-breaking changes detected:",
+      );
+      for (const item of job.changeSummary.changes) {
+        const fixSuffix = item.breaking && item.fix ? ` — Fix: ${item.fix}` : "";
+        lines.push(`${item.breaking ? "⚠ " : "• "}${item.text}${fixSuffix}`);
+      }
+    } else {
+      lines.push("", "Changes:");
+      for (const item of formatSummaryAsListItems(summary)) {
+        lines.push(`• ${item}`);
+      }
+    }
   } else if (job.status === "queued" || job.status === "running" || job.status === "codegen") {
     lines.push("", "Worker is processing your selection…");
   } else if (job.prUrl) {
@@ -1526,9 +2343,79 @@ window.onmessage = (event: MessageEvent) => {
       clearValidatedBuildState();
     }
 
+    if (nextSelectionId !== currentSelectionId) {
+      clearMatchState();
+      hideBuildPreview();
+    }
+
     currentSelectionId = nextSelectionId;
     syncBuildUiState();
     syncDefaultDisabled();
+    return;
+  }
+
+  if (msg.type === "component-resolving") {
+    const selId = typeof msg.selectionId === "string" ? msg.selectionId : null;
+    if (selId && selId !== currentSelectionId) {
+      return;
+    }
+    setResolvingMatch(true);
+    return;
+  }
+
+  if (msg.type === "component-resolved") {
+    const selId = typeof msg.selectionId === "string" ? msg.selectionId : null;
+    if (selId && currentSelectionId && selId !== currentSelectionId) {
+      return;
+    }
+    setResolvingMatch(false);
+
+    const mode = msg.mode === "update" ? "update" : "create";
+    if (mode === "update" && msg.matched && msg.bundleId && msg.bundle) {
+      componentWorkflowMode = "update";
+      currentResolvedBundle = msg.bundle as ResolvedBundleSummary;
+      renderResolvedBundle(currentResolvedBundle);
+      prepareExistingPreview(currentResolvedBundle);
+      showBuildProgress(currentResolvedBundle.componentName);
+      statusEl.textContent = `Found ${currentResolvedBundle.componentName} — building preview…`;
+    } else {
+      componentWorkflowMode = "create";
+      currentResolvedBundle = null;
+      matchSectionEl.classList.add("hidden");
+      if (msg.reason && typeof msg.reason === "string") {
+        statusEl.textContent = msg.reason;
+      }
+    }
+    syncPushButtonLabel();
+    syncDefaultDisabled();
+    return;
+  }
+
+  if (msg.type === "existing-preview-ready") {
+    const selId = typeof msg.selectionId === "string" ? msg.selectionId : null;
+    if (selId && currentSelectionId && selId !== currentSelectionId) return;
+    hideBuildProgress();
+    revealExistingPreview(
+      msg.sessionId as string,
+      msg.previewUrl as string,
+    );
+    statusEl.textContent = "";
+    return;
+  }
+
+  if (msg.type === "existing-preview-failed") {
+    hideBuildProgress();
+    statusEl.textContent = "Preview could not be built — you can still browse the code files.";
+    if (currentBuildPreview) {
+      buildPreviewFormatEl.textContent = "Existing component";
+      setPreviewViewMode("code");
+      refreshCodeExplorers();
+      buildPreviewSection.classList.remove("hidden");
+      buildPreviewCardEl.classList.remove("hidden");
+      previewWorkflowEl.classList.remove("hidden");
+      syncBuildUiState();
+      syncDefaultDisabled();
+    }
     return;
   }
 
@@ -1595,10 +2482,20 @@ window.onmessage = (event: MessageEvent) => {
   }
 
   if (msg.type === "job-created") {
-    hideBuildPreview();
-    buildCorrectionsEl.value = "";
     const job = msg.job as { id: string; status: string; componentName?: string };
-    statusEl.textContent = formatJobStatus(job);
+    const preservePreview =
+      preservePreviewDuringJob ||
+      activeStreamJobId === "pending" ||
+      Boolean(correctionStreamEl.querySelector("[data-stream-status='true']"));
+    if (preservePreview) {
+      activeStreamJobId = job.id;
+    } else {
+      hideBuildPreview();
+      buildCorrectionsEl.value = "";
+    }
+    if (!preservePreview) {
+      statusEl.textContent = formatJobStatus(job);
+    }
   }
 
   if (msg.type === "job-update") {
@@ -1609,15 +2506,27 @@ window.onmessage = (event: MessageEvent) => {
       prUrl?: string;
       error?: string;
       codegenSummary?: string;
+      changeSummary?: CodegenChangeSummary;
       patchCount?: number;
       buildPreview?: BuildPreview;
     };
-    statusEl.textContent = formatJobStatus(job);
+    handleJobStatusForActivityStream(job);
+    const preservedRun = isPreservedPreviewJob(job.id);
+
+    if (!preservedRun) {
+      statusEl.textContent = formatJobStatus(job);
+    }
+
     if (job.status === "validated" && job.buildPreview) {
       lastValidatedSelectionId = currentSelectionId;
+      setPreviewBusy(false);
       showBuildPreview(job.buildPreview, job.id);
     } else if (job.status === "failed" || job.status === "needs_manual_fix") {
-      clearValidatedBuildState();
+      if (!preservedRun) {
+        clearValidatedBuildState();
+      } else {
+        setPreviewBusy(false);
+      }
     }
     if (
       job.status === "validated" ||
@@ -1636,14 +2545,13 @@ window.onmessage = (event: MessageEvent) => {
 };
 
 window.addEventListener("message", (event: MessageEvent) => {
-  const origin = previewMessageOrigin();
-  if (origin !== "*" && event.origin !== origin) {
+  if (!isPreviewMessage(event)) {
     return;
   }
 
   if (event.data?.type === PREVIEW_READY_MESSAGE) {
-    postPreviewVariantsToFrame(buildPreviewFrameEl);
-    postPreviewVariantsToFrame(previewModalFrameEl);
+    postPreviewArgsToFrame(buildPreviewFrameEl);
+    postPreviewArgsToFrame(previewModalFrameEl);
     return;
   }
 
@@ -1654,6 +2562,19 @@ window.addEventListener("message", (event: MessageEvent) => {
     }
   }
 });
+
+function isPreviewMessage(event: MessageEvent): boolean {
+  const msgType = event.data?.type;
+  if (typeof msgType !== "string") return false;
+  if (!msgType.startsWith("fig2code-preview-")) return false;
+  const apiOrigin = previewMessageOrigin();
+  if (apiOrigin === "*") return true;
+  if (event.origin === apiOrigin) return true;
+  try {
+    if (new URL(event.origin).hostname === "localhost") return true;
+  } catch {}
+  return false;
+}
 
 statusEl.textContent = "UI loaded — waiting for plugin…";
 
@@ -1673,6 +2594,8 @@ mountPreviewIcon(copyPreviewModalFileBtn, PREVIEW_ICON_COPY);
 mountPreviewIcon(closePreviewModalBtn, PREVIEW_ICON_CLOSE);
 
 syncCodeSidebarExpanded();
+correctionStreamEl.addEventListener("scroll", syncCorrectionStreamFade, { passive: true });
+window.addEventListener("resize", syncCorrectionStreamFade);
 setupCodeEditorEvents(inlineCodeExplorer);
 setupCodeEditorEvents(modalCodeExplorer);
 

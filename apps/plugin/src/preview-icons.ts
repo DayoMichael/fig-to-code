@@ -15,3 +15,6 @@ export const PREVIEW_ICON_SIDEBAR = `<svg viewBox="0 0 16 16" aria-hidden="true"
 export const PREVIEW_ICON_CHEVRON_LEFT = `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M10.2 3.8 6.4 8l3.8 4.2-.9 1L4.5 8l5.6-6.2.9 1Z"/></svg>`;
 
 export const PREVIEW_ICON_CHEVRON_RIGHT = `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5.8 3.8 9.6 8l-3.8 4.2.9 1L11.5 8 5.9 2.8l-.9 1Z"/></svg>`;
+
+/** Monochrome Figma mark for compact update button. */
+export const PREVIEW_ICON_FIGMA = `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5.2 2h2.6a2.2 2.2 0 0 1 0 4.4H5.2V2Zm0 4.4h2.6a2.2 2.2 0 0 1 0 4.4H5.2V6.4ZM2.6 8.8a2.2 2.2 0 1 0 4.4 0 2.2 2.2 0 0 0-4.4 0Zm5.2 0h2.6a2.2 2.2 0 0 1 0 4.4H7.8V8.8Zm0 4.4h2.6a2.2 2.2 0 0 1-2.2 2.2V13.2Z"/></svg>`;

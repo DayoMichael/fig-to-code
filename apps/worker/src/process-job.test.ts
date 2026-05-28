@@ -69,6 +69,67 @@ describe("processJob", () => {
     assert.equal(result.patchCount, 2);
     assert.equal(mock.calls.length, 1);
   });
+
+  it("dispatches component-update intent through the update profile and existing_files slot", async () => {
+    const mock = mockProvider();
+    const client = {
+      async patchJob(_jobId: string, patch: Record<string, unknown>) {
+        return { id: "job-1", ...patch } as never;
+      },
+    };
+
+    const result = await processJob(
+      {
+        jobId: "job-1",
+        intent: "component-update",
+        targets: ["web"],
+        sessionId: "s1",
+        gitToken: "tok",
+        prunedSpec: syntheticPayload.prunedSpec,
+        vcs: syntheticPayload.vcs,
+        syncConfig: syntheticPayload.syncConfig,
+        bundleId: "bundle-test-1",
+      },
+      client,
+      {
+        llmProvider: mock,
+        apiKey: "test-key",
+        resolveBundle: async () => ({
+          componentName: "Button",
+          match: {
+            source: "registry",
+            confidence: "high",
+            reason: "matched via registry",
+          },
+          files: [
+            {
+              path: "src/components/Button/Button.tsx",
+              role: "component",
+              content: "export const Button = () => null;",
+            },
+            {
+              path: "src/components/Button/Button.stories.tsx",
+              role: "story",
+              content: "export default { component: Button };",
+            },
+          ],
+          primaryComponentPath: "src/components/Button/Button.tsx",
+          storyPath: "src/components/Button/Button.stories.tsx",
+        }),
+      },
+    );
+
+    assert.equal(result.status, "validated");
+    assert.equal(mock.calls.length, 1);
+
+    const envelope = mock.calls[0]?.envelope;
+    assert.ok(envelope);
+    assert.equal(envelope!.profile, "component-update-v1");
+
+    const existingFilesSlot = envelope!.slots.find((s) => s.id === "existing_files");
+    assert.ok(existingFilesSlot, "existing_files slot present");
+    assert.match(existingFilesSlot!.content, /Button\.tsx/);
+  });
 });
 
 function mockProvider() {

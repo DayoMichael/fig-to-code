@@ -12,7 +12,7 @@ app.use(
   "*",
   cors({
     origin: (origin) => origin ?? "*",
-    allowMethods: ["GET", "HEAD", "POST", "PATCH", "OPTIONS"],
+    allowMethods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "x-git-token", "x-atlassian-email", "x-llm-token", "x-worker-secret"],
     maxAge: 86_400,
   }),

@@ -96,6 +96,7 @@ export function toPublicRecord(stored: StoredJob): JobRecord {
     error: stored.error,
     retriesUsed: stored.retriesUsed,
     codegenSummary: stored.codegenSummary,
+    changeSummary: stored.changeSummary,
     patchCount: stored.patchCount,
     buildPreview: stored.buildPreview,
   };

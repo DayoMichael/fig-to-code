@@ -1,6 +1,7 @@
 import type { PrunedSpec } from "./pruned-spec.js";
 import type { Platform } from "./detected-config.js";
 import type { SyncConfig, VcsConfig } from "./sync-config.js";
+import type { CodegenChangeSummary } from "./codegen.js";
 
 export type JobStatus =
   | "queued"
@@ -19,7 +20,7 @@ export const TERMINAL_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
   "needs_manual_fix",
 ]);
 
-export type JobIntent = "component" | "screen" | "token" | "icon";
+export type JobIntent = "component" | "component-update" | "screen" | "token" | "icon";
 
 export interface CreateJobRequest {
   intent: JobIntent;
@@ -34,6 +35,14 @@ export interface EnqueueJobRequest extends CreateJobRequest {
   sessionId: string;
   vcs: VcsConfig;
   syncConfig: SyncConfig;
+  /** Set when intent === "component-update" to point at a resolved repo bundle. */
+  bundleId?: string;
+  /** Inline file contents from the plugin preview (edits + corrections). */
+  previewFileOverrides?: Array<{
+    path: string;
+    role: string;
+    content: string;
+  }>;
 }
 
 export interface JobRecord {
@@ -47,6 +56,7 @@ export interface JobRecord {
   error?: string;
   retriesUsed?: number;
   codegenSummary?: string;
+  changeSummary?: CodegenChangeSummary;
   patchCount?: number;
   buildPreview?: JobBuildPreview;
 }
@@ -55,6 +65,12 @@ export interface JobBuildPreviewFile {
   path: string;
   action: "create" | "update" | "delete";
   content?: string;
+}
+
+export interface JobBuildPreviewPropControl {
+  name: string;
+  control: "select" | "text" | "boolean" | "number";
+  options?: string[];
 }
 
 export interface JobBuildPreview {
@@ -66,6 +82,8 @@ export interface JobBuildPreview {
   componentContent?: string;
   variantLabel: string;
   variants?: Record<string, string[]>;
+  /** Editable non-variant props for live preview controls. */
+  propControls?: JobBuildPreviewPropControl[];
   /** All generated/edited files from codegen patches. */
   files?: JobBuildPreviewFile[];
   /** CSS variable definitions for design tokens used in the component. */

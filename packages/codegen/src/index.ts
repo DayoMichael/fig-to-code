@@ -12,32 +12,47 @@ export {
   storyFormatLabel,
 } from "./preview.js";
 export type { BuildJobPreviewInput } from "./preview.js";
+export { findSyntaxIssues, formatIssuesForLlm } from "./syntax-check.js";
+export type { SyntaxIssue } from "./syntax-check.js";
 export {
-  extractExportedBindings,
-  extractImports,
-  resolveImportCandidates,
-  resolvePreviewImports,
-  shouldResolvePreviewImport,
-  isPreviewModuleSource,
-  moduleDefinesBinding,
-} from "./preview-dependencies.js";
-export type { ParsedImport, PreviewDependencyContext, PreviewImportResolution } from "./preview-dependencies.js";
+  normalizeChangeSummary,
+  splitSummaryIntoLines,
+  formatChangeSummaryText,
+  inferBreakingFromText,
+  inferFixFromText,
+  applyConservativeBreakingFlags,
+  ensureBreakingFixes,
+} from "./change-summary.js";
 export {
-  buildStorybookPreviewHtml,
-  resolveStoryPreviewTarget,
+  extractComponentName,
+  isDefaultExport,
   argsFromVariants,
   argsFromVariantSelection,
   parsePreviewVariantQuery,
   formatVariantSelectionLabel,
   defaultPreviewArgs,
-  prepareDependencyModule,
-  preparePreviewBundle,
-  prepareHotReloadComponentSource,
-  buildHotReloadPreviewSource,
-} from "./storybook-preview.js";
+  enrichPreviewArgs,
+  extractHandlerPropNames,
+  extractInjectedTokenCss,
+  collectCssVariableNames,
+  extractTailwindColorClasses,
+  buildTokenColorUtilityCss,
+  buildTailwindConfigFromTokenCss,
+  extractBareImportSpecifiers,
+  extractCvaVariantAxes,
+  extractCvaDefaultVariants,
+  extractStoryArgTypeOptions,
+  extractStoryDefaultArgs,
+  extractExistingPreviewMetadata,
+  resolveInitialVariantSelection,
+  resolveInitialPreviewArgs,
+  extractStoryPropControls,
+  extractComponentPropControls,
+  extractComponentDefaultPropValues,
+  buildPreviewPropControls,
+} from "./preview-utils.js";
 export type {
-  PreviewDependencyBundle,
-  PreparePreviewBundleOptions,
   StoryPreviewTarget,
-  StorybookPreviewOptions,
-} from "./storybook-preview.js";
+  PreviewPropControl,
+  PreviewPropControlType,
+} from "./preview-utils.js";

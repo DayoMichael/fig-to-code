@@ -2,16 +2,43 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { FilePatch, GateResult, PrunedSpec, ProjectTokensSummary, QaReport, SyncConfig } from "@fig2code/spec";
+import type {
+  FilePatch,
+  GateResult,
+  JobIntent,
+  PrunedSpec,
+  ProjectTokensSummary,
+  QaReport,
+  ResolvedComponentFile,
+  SyncConfig,
+} from "@fig2code/spec";
 import { resolvePrunedSpecTokens } from "@fig2code/repo";
-import { buildComponentEnvelope } from "@fig2code/prompts";
+import { normalizeGeneratedStyleClasses } from "./preview.js";
+import {
+  buildComponentEnvelope,
+  buildComponentUpdateEnvelope,
+  buildRepairEnvelope,
+} from "@fig2code/prompts";
 import {
   createLlmProviderForModel,
   parseCodegenOutput,
   type LLMProvider,
 } from "@fig2code/llm";
+import { findSyntaxIssues, formatIssuesForLlm } from "./syntax-check.js";
+import {
+  formatChangeSummaryText,
+  normalizeChangeSummary,
+} from "./change-summary.js";
+import type { CodegenChangeSummary } from "@fig2code/spec";
 
 const execFileAsync = promisify(execFile);
+
+export interface ExistingFilesContext {
+  componentName: string;
+  files: ResolvedComponentFile[];
+  relatedModules?: ResolvedComponentFile[];
+  truncated?: boolean;
+}
 
 export interface CodegenContext {
   syncConfig: SyncConfig;
@@ -22,51 +49,172 @@ export interface CodegenContext {
   exampleStyles: string;
   apiKey: string;
   llmProvider?: LLMProvider;
+  intent?: JobIntent;
+  existingFiles?: ExistingFilesContext;
 }
 
 export interface CodegenRunResult {
   patches: FilePatch[];
   envelopeTokens: number;
   summary?: string;
+  changeSummary?: CodegenChangeSummary;
 }
 
 export async function runCodegen(context: CodegenContext): Promise<CodegenRunResult> {
   const modelId = context.syncConfig.llm?.modelId ?? "anthropic/claude-sonnet";
-  const profile = (context.syncConfig.llm?.promptProfile ?? "component-v1") as "component-v1";
+  const isUpdate = context.intent === "component-update" && Boolean(context.existingFiles);
 
   const resolvedSpec = resolvePrunedSpecTokens(context.prunedSpec, context.tokenResolver, {
     styleSystem: context.syncConfig.web?.styleSystem,
     tokenCatalog: context.syncConfig.tokens?.catalog,
   });
 
-  const envelope = buildComponentEnvelope({
-    profile,
+  const baseInput = {
     modelId,
-    jobFacts: {
-      intent: "component",
-      targets: context.syncConfig.platforms,
-      conventions: context.syncConfig.conventions,
-      ...(context.syncConfig.llm?.notes
-        ? { teamNotes: context.syncConfig.llm.notes }
-        : {}),
-    },
     prunedSpec: resolvedSpec,
     projectTokens: context.projectTokens,
     tokenResolver: context.tokenResolver,
     registryHints: context.registryHints,
     exampleStyles: context.exampleStyles,
     envelopeBudget: context.syncConfig.llm?.envelopeBudget?.estimatedTokensSoft,
-  });
+  };
+
+  const envelope = isUpdate
+    ? buildComponentUpdateEnvelope({
+        ...baseInput,
+        profile: "component-update-v1",
+        jobFacts: {
+          intent: "component-update",
+          targets: context.syncConfig.platforms,
+          conventions: context.syncConfig.conventions,
+          componentName: context.existingFiles!.componentName,
+          primaryComponentPath:
+            context.existingFiles!.files.find((file) => file.role === "component")?.path,
+          storyPath: context.existingFiles!.files.find((file) => file.role === "story")?.path,
+          ...(context.syncConfig.llm?.notes
+            ? { teamNotes: context.syncConfig.llm.notes }
+            : {}),
+        },
+        existingFiles: context.existingFiles!,
+      })
+    : buildComponentEnvelope({
+        ...baseInput,
+        profile: "component-v1",
+        jobFacts: {
+          intent: "component",
+          targets: context.syncConfig.platforms,
+          conventions: context.syncConfig.conventions,
+          ...(context.syncConfig.llm?.notes
+            ? { teamNotes: context.syncConfig.llm.notes }
+            : {}),
+        },
+      });
 
   const provider = context.llmProvider ?? createLlmProviderForModel(modelId);
   const raw = await provider.complete({ envelope, apiKey: context.apiKey });
-  const output = parseCodegenOutput(raw);
+  let output = parseCodegenOutput(raw);
+  let bestOutput = output;
+  let bestIssues = findSyntaxIssues(output.patches);
+
+  const MAX_REPAIR_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS && bestIssues.length > 0; attempt += 1) {
+    const repairEnvelope = buildRepairEnvelope(envelope, {
+      attempt,
+      gateName: "preview-syntax",
+      gateExitCode: 1,
+      truncatedStderr: buildSyntaxRepairInstructions(bestIssues, attempt),
+      lastPatchSummary: {
+        patchCount: bestOutput.patches.length,
+        firstPath: bestOutput.patches[0]?.path,
+      },
+    });
+    const repaired = await provider.complete({
+      envelope: repairEnvelope,
+      apiKey: context.apiKey,
+    });
+    const repairedOutput = parseCodegenOutput(repaired);
+    const repairedIssues = findSyntaxIssues(repairedOutput.patches);
+    if (repairedIssues.length < bestIssues.length) {
+      bestOutput = repairedOutput;
+      bestIssues = repairedIssues;
+    }
+    if (bestIssues.length === 0) break;
+  }
+
+  output = {
+    ...bestOutput,
+    patches: normalizeCodegenPatches(bestOutput.patches, context),
+  };
+
+  const changeSummary = isUpdate ? normalizeChangeSummary(output) : null;
+  let summary =
+    bestIssues.length > 0
+      ? appendUnresolvedIssuesSummary(output.summary, bestIssues)
+      : output.summary;
+  if (!summary && changeSummary) {
+    summary = formatChangeSummaryText(changeSummary);
+  }
 
   return {
     patches: output.patches,
     envelopeTokens: envelope.estimatedTotalTokens ?? 0,
-    summary: output.summary,
+    summary,
+    changeSummary: changeSummary ?? undefined,
   };
+}
+
+function buildSyntaxRepairInstructions(
+  issues: ReturnType<typeof findSyntaxIssues>,
+  attempt: number,
+): string {
+  const prefix = attempt === 1
+    ? "Your previous output failed JS/TS/JSX parsing in our in-plugin Babel preview compiler. The job will be rejected unless you fix it."
+    : "Your previous repair attempt STILL did not parse. This is your last chance. Re-emit the FULL JSON patch list with every issue below fixed.";
+
+  return `${prefix}
+
+How to think about this:
+- The preview iframe runs each component file through @babel/parser with the TypeScript and JSX plugins. The file must parse.
+- The most common slip is dropping the colon between a destructured param list and its inline type:
+    BAD:  function Foo({ a, b }{ c?: number }) { ... }
+    GOOD: function Foo({ a, b }: { a: T; b: T; c?: number }) { ... }
+  Better still — don't use inline destructured types at all:
+    GOOD: interface FooProps { a: T; b: T; c?: number; }
+          function Foo(props: FooProps) { const { a, b, c } = props; ... }
+- Re-emit the FULL JSON patch list (every file you intended to change), not just the one with the bug.
+- Do NOT add new files; keep paths and \`action\` values consistent with the previous output.
+- Keep design tokens / class strings / behaviour identical; only fix the parse error.
+
+Parse errors to fix:
+${formatIssuesForLlm(issues)}`;
+}
+
+function normalizeCodegenPatches(
+  patches: FilePatch[],
+  context: CodegenContext,
+): FilePatch[] {
+  const tokenCss = context.syncConfig.tokens?.sourceExcerpt;
+  const catalog = context.syncConfig.tokens?.catalog;
+
+  return patches.map((patch) => {
+    if (!patch.content) {
+      return patch;
+    }
+    return {
+      ...patch,
+      content: normalizeGeneratedStyleClasses(patch.content, tokenCss, catalog),
+    };
+  });
+}
+
+function appendUnresolvedIssuesSummary(
+  summary: string | undefined,
+  issues: ReturnType<typeof findSyntaxIssues>,
+): string {
+  const lead =
+    "Preview may show a Babel compile error — the model could not produce parseable code after repair attempts. Edit the file in the code panel and rebuild to clear it.";
+  const details = formatIssuesForLlm(issues);
+  return summary ? `${summary}\n\n${lead}\n${details}` : `${lead}\n${details}`;
 }
 
 export async function applyPatches(workspaceRoot: string, patches: FilePatch[]): Promise<void> {

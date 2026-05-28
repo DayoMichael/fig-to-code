@@ -2,7 +2,7 @@ import type { ClaimedJobPayload, JobRecord } from "@fig2code/spec";
 import { validatePrunedSpec } from "@fig2code/spec";
 import { buildJobPreview, runCodegen } from "@fig2code/codegen";
 import type { LLMProvider } from "@fig2code/llm";
-import { hydrateCodegenContext } from "./hydrate-context.js";
+import { hydrateCodegenContext, type BundleResolver } from "./hydrate-context.js";
 
 export interface JobPatchClient {
   patchJob(jobId: string, patch: Partial<JobRecord>): Promise<JobRecord>;
@@ -11,6 +11,9 @@ export interface JobPatchClient {
 export interface ProcessJobOptions {
   llmProvider?: LLMProvider;
   apiKey?: string;
+  apiBase?: string;
+  resolveBundle?: BundleResolver;
+  fetchImpl?: typeof fetch;
 }
 
 /**
@@ -37,8 +40,18 @@ export async function processJob(
       payload,
       llmProvider: options.llmProvider,
       apiKey: options.apiKey,
+      apiBase: options.apiBase,
+      resolveBundle: options.resolveBundle,
+      fetchImpl: options.fetchImpl,
     });
     const result = await runCodegen(context);
+    const buildPreview = buildJobPreview({
+      patches: result.patches,
+      prunedSpec: payload.prunedSpec,
+      storyFormat: context.syncConfig.conventions?.storyFormat ?? "none",
+      tokenCss: context.syncConfig.tokens?.sourceExcerpt,
+      tokenCatalog: context.syncConfig.tokens?.catalog,
+    });
 
     return client.patchJob(payload.jobId, {
       status: "validated",
@@ -46,12 +59,8 @@ export async function processJob(
       codegenSummary:
         result.summary ??
         `Generated ${result.patches.length} patch(es) via ${context.syncConfig.llm?.modelId ?? "anthropic/claude-sonnet"}.`,
-      buildPreview: buildJobPreview({
-        patches: result.patches,
-        prunedSpec: payload.prunedSpec,
-        storyFormat: context.syncConfig.conventions?.storyFormat ?? "none",
-        tokenCss: context.syncConfig.tokens?.sourceExcerpt,
-      }),
+      changeSummary: result.changeSummary,
+      buildPreview,
     });
   } catch (error) {
     return client.patchJob(payload.jobId, {

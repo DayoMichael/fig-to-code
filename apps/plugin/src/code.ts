@@ -1,6 +1,16 @@
 import { normalizeColorTokenName, parseFontWeightFromStyle, parseVariantName, pruneNodeTree } from "@fig2code/figma-ast";
 import type { FigmaNodeSnapshot } from "@fig2code/figma-ast";
-import type { FigmaTextTypography, JobRecord, PrunedSpec, TokenCatalog, TokenConfig, TypographyCatalog, TypographyConfig, VcsConfig } from "@fig2code/spec";
+import type {
+  FigmaTextTypography,
+  JobRecord,
+  PrunedSpec,
+  ResolveComponentResponse,
+  TokenCatalog,
+  TokenConfig,
+  TypographyCatalog,
+  TypographyConfig,
+  VcsConfig,
+} from "@fig2code/spec";
 import { isTerminalJobStatus, type EnqueueJobRequest } from "@fig2code/spec";
 import {
   applySetupOverrides,
@@ -18,6 +28,19 @@ import {
 } from "./connection.js";
 
 const DEFAULT_API_BASE = "http://localhost:3000";
+const RESOLVE_DEBOUNCE_MS = 300;
+
+interface ResolveState {
+  selectionId: string;
+  componentName: string;
+  bundleId?: string;
+  matched: boolean;
+  reason?: string;
+}
+
+let lastResolve: ResolveState | null = null;
+let resolveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let resolveRequestSeq = 0;
 
 figma.ui.onmessage = async (msg: PluginMessage) => {
   try {
@@ -530,14 +553,40 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
     };
   }
 
-  const body: EnqueueJobRequest = {
-    intent: "component",
-    prunedSpec,
-    targets: syncConfig.platforms,
-    sessionId: connection.sessionId,
-    vcs: connection.vcs,
-    syncConfig,
-  };
+  const resolvedName = resolveComponentNameFromNode(node) ?? prunedSpec.name;
+  const bundleMatch =
+    lastResolve &&
+    lastResolve.matched &&
+    lastResolve.selectionId === node.id &&
+    lastResolve.componentName === resolvedName &&
+    lastResolve.bundleId
+      ? lastResolve
+      : null;
+
+  const previewFileOverrides = msg.previewFileOverrides?.filter(
+    (file) => file.path.trim() && file.content.trim(),
+  );
+  const hasPreviewOverrides = Boolean(previewFileOverrides?.length);
+
+  const body: EnqueueJobRequest = bundleMatch || hasPreviewOverrides
+    ? {
+        intent: "component-update",
+        prunedSpec,
+        targets: syncConfig.platforms,
+        sessionId: connection.sessionId,
+        vcs: connection.vcs,
+        syncConfig,
+        ...(bundleMatch?.bundleId ? { bundleId: bundleMatch.bundleId } : {}),
+        ...(hasPreviewOverrides ? { previewFileOverrides } : {}),
+      }
+    : {
+        intent: "component",
+        prunedSpec,
+        targets: syncConfig.platforms,
+        sessionId: connection.sessionId,
+        vcs: connection.vcs,
+        syncConfig,
+      };
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -1138,6 +1187,269 @@ function postSelectionState(): void {
     selectionId: node?.id ?? null,
     selectionName: node?.name ?? null,
   });
+
+  scheduleResolveComponent(node);
+}
+
+function scheduleResolveComponent(node: SceneNode | null): void {
+  if (resolveDebounceTimer) {
+    clearTimeout(resolveDebounceTimer);
+    resolveDebounceTimer = null;
+  }
+
+  if (!node || !hasValidPushSelection()) {
+    lastResolve = null;
+    figma.ui.postMessage({
+      type: "component-resolved",
+      mode: "create",
+      matched: false,
+      selectionId: node?.id ?? null,
+      componentName: node?.name ?? null,
+    });
+    return;
+  }
+
+  const selectionId = node.id;
+  const componentName = resolveComponentNameFromNode(node);
+  if (!componentName) {
+    lastResolve = null;
+    figma.ui.postMessage({
+      type: "component-resolved",
+      mode: "create",
+      matched: false,
+      selectionId,
+      componentName: null,
+    });
+    return;
+  }
+
+  if (
+    lastResolve &&
+    lastResolve.selectionId === selectionId &&
+    lastResolve.componentName === componentName
+  ) {
+    figma.ui.postMessage({
+      type: "component-resolved",
+      mode: lastResolve.matched ? "update" : "create",
+      matched: lastResolve.matched,
+      selectionId,
+      componentName,
+      bundleId: lastResolve.bundleId,
+      reason: lastResolve.reason,
+    });
+    return;
+  }
+
+  figma.ui.postMessage({
+    type: "component-resolving",
+    selectionId,
+    componentName,
+  });
+
+  resolveDebounceTimer = setTimeout(() => {
+    void runResolveComponent(componentName, selectionId);
+  }, RESOLVE_DEBOUNCE_MS);
+}
+
+function resolveComponentNameFromNode(node: SceneNode): string | null {
+  const raw = node.name?.trim();
+  if (!raw) return null;
+  const head = raw.split(/[/=]/)[0]?.trim();
+  return head || raw;
+}
+
+async function runResolveComponent(componentName: string, selectionId: string): Promise<void> {
+  const seq = ++resolveRequestSeq;
+  const [connection, token, atlassianEmail] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+      PluginConnection | undefined
+    >,
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<
+      string | undefined
+    >,
+  ]);
+
+  if (!connection || !token) {
+    lastResolve = null;
+    figma.ui.postMessage({
+      type: "component-resolved",
+      mode: "create",
+      matched: false,
+      selectionId,
+      componentName,
+      reason: "Connect a repository to detect existing components.",
+    });
+    return;
+  }
+
+  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+
+  console.log("[fig2code] resolve-component start", {
+    componentName,
+    selectionId,
+    apiBase,
+    componentPath: connection.syncConfig.web?.componentPath,
+  });
+
+  try {
+    const res = await fetch(`${apiBase}/repos/resolve-component`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vcs: connection.vcs,
+        token,
+        atlassianEmail,
+        componentName,
+        syncConfig: connection.syncConfig,
+        detected: connection.detected,
+      }),
+    });
+
+    if (seq !== resolveRequestSeq) {
+      return;
+    }
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}) as Record<string, unknown>);
+      const reason =
+        typeof errBody?.error === "string"
+          ? errBody.error
+          : `Resolve failed (${res.status})`;
+      console.warn("[fig2code] resolve-component error", { status: res.status, reason });
+      lastResolve = {
+        selectionId,
+        componentName,
+        matched: false,
+        reason,
+      };
+      figma.ui.postMessage({
+        type: "component-resolved",
+        mode: "create",
+        matched: false,
+        selectionId,
+        componentName,
+        reason,
+      });
+      return;
+    }
+
+    const body = (await res.json()) as ResolveComponentResponse;
+    console.log("[fig2code] resolve-component done", {
+      componentName,
+      matched: body.matched,
+      bundleId: body.bundleId,
+      files: body.bundle?.files?.map((f) => f.path),
+    });
+    if (body.matched && body.bundleId && body.bundle) {
+      lastResolve = {
+        selectionId,
+        componentName,
+        bundleId: body.bundleId,
+        matched: true,
+        reason: body.bundle.match.reason,
+      };
+
+      const componentFile = body.bundle.files.find(
+        (f: { role: string }) => f.role === "component",
+      );
+      const storyFile = body.bundle.files.find(
+        (f: { role: string }) => f.role === "story",
+      );
+
+      figma.ui.postMessage({
+        type: "component-resolved",
+        mode: "update",
+        matched: true,
+        selectionId,
+        componentName,
+        bundleId: body.bundleId,
+        bundle: body.bundle,
+        reason: body.bundle.match.reason,
+      });
+
+      if (componentFile) {
+        const previewSeq = seq;
+        fetch(`${apiBase}/preview/existing`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-git-token": token,
+          },
+          body: JSON.stringify({
+            vcs: connection.vcs,
+            componentPath: componentFile.path,
+            componentName: body.bundle.componentName,
+            storyPath: storyFile?.path,
+            atlassianEmail,
+            tokenPaths:
+              connection.syncConfig.web?.tokenPaths ??
+              connection.syncConfig.tokens?.tokenPaths ??
+              connection.detected.tokenPaths,
+          }),
+        })
+          .then(async (previewRes) => {
+            if (previewSeq !== resolveRequestSeq) return;
+            if (!previewRes.ok) {
+              console.warn("[fig2code] existing preview failed", previewRes.status);
+              figma.ui.postMessage({ type: "existing-preview-failed" });
+              return;
+            }
+            const data = (await previewRes.json()) as {
+              sessionId: string;
+              previewUrl: string;
+              viteUrl: string;
+            };
+            if (previewSeq !== resolveRequestSeq) return;
+            figma.ui.postMessage({
+              type: "existing-preview-ready",
+              sessionId: data.sessionId,
+              previewUrl: `${apiBase}${data.previewUrl}`,
+              selectionId,
+            });
+          })
+          .catch((err) => {
+            console.warn("[fig2code] existing preview error", err);
+            if (previewSeq === resolveRequestSeq) {
+              figma.ui.postMessage({ type: "existing-preview-failed" });
+            }
+          });
+      }
+    } else {
+      lastResolve = {
+        selectionId,
+        componentName,
+        matched: false,
+        reason: body.reason,
+      };
+      figma.ui.postMessage({
+        type: "component-resolved",
+        mode: "create",
+        matched: false,
+        selectionId,
+        componentName,
+        reason: body.reason ?? `No matching files for "${componentName}" in repo.`,
+      });
+    }
+  } catch (error) {
+    if (seq !== resolveRequestSeq) return;
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn("[fig2code] resolve-component fetch failed", reason);
+    lastResolve = {
+      selectionId,
+      componentName,
+      matched: false,
+      reason,
+    };
+    figma.ui.postMessage({
+      type: "component-resolved",
+      mode: "create",
+      matched: false,
+      selectionId,
+      componentName,
+      reason,
+    });
+  }
 }
 
 figma.on("selectionchange", postSelectionState);
@@ -1184,6 +1496,11 @@ interface PushSelectionMessage {
   provider: string;
   modelId: string;
   corrections?: string;
+  previewFileOverrides?: Array<{
+    path: string;
+    role: string;
+    content: string;
+  }>;
 }
 
 type PluginMessage =

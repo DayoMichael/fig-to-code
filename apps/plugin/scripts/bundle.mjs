@@ -12,6 +12,10 @@ mkdirSync(distDir, { recursive: true });
 
 const watch = process.argv.includes("--watch");
 
+const repoRoot = join(root, "../..");
+const codegenPreviewUtils = join(repoRoot, "packages/codegen/src/preview-utils.ts");
+const codegenChangeSummary = join(repoRoot, "packages/codegen/src/change-summary.ts");
+
 const uiBuild = {
   entryPoints: [join(srcDir, "ui.ts")],
   bundle: true,
@@ -19,6 +23,10 @@ const uiBuild = {
   target: "es2017",
   format: "iife",
   logLevel: "info",
+  alias: {
+    "@fig2code/codegen/preview-utils": codegenPreviewUtils,
+    "@fig2code/codegen/change-summary": codegenChangeSummary,
+  },
 };
 
 function inlineUiHtml() {

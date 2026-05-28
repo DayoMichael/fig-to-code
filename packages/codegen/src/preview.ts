@@ -1,5 +1,26 @@
-import type { FilePatch } from "@fig2code/spec";
-import type { JobBuildPreview, PrunedSpec, StoryFormat } from "@fig2code/spec";
+import {
+  replaceArbitraryCssVarClasses,
+  replaceArbitraryTailwindColors,
+} from "@fig2code/repo";
+import type { FilePatch, JobBuildPreview, PrunedSpec, StoryFormat, TokenCatalog } from "@fig2code/spec";
+import { extractExistingPreviewMetadata } from "./preview-utils.js";
+
+/** Normalize LLM/repo class strings for preview + editable panel (semantic token utilities). */
+export function normalizeGeneratedStyleClasses(
+  source: string,
+  tokenCss?: string,
+  catalog?: TokenCatalog,
+): string {
+  if (!source.trim()) {
+    return source;
+  }
+
+  let normalized = replaceArbitraryCssVarClasses(source, tokenCss);
+  if (catalog) {
+    normalized = replaceArbitraryTailwindColors(normalized, catalog);
+  }
+  return normalized;
+}
 
 const STORY_FILE_RE = /\.stories\.(tsx?|jsx?|mdx)$/i;
 const COMPONENT_FILE_RE = /\.(tsx|jsx)$/i;
@@ -9,10 +30,22 @@ export interface BuildJobPreviewInput {
   prunedSpec: PrunedSpec;
   storyFormat?: StoryFormat;
   tokenCss?: string;
+  tokenCatalog?: TokenCatalog;
+}
+
+function normalizePatchContent(
+  content: string | undefined,
+  tokenCss?: string,
+  catalog?: TokenCatalog,
+): string | undefined {
+  if (!content) {
+    return content;
+  }
+  return normalizeGeneratedStyleClasses(content, tokenCss, catalog);
 }
 
 export function buildJobPreview(input: BuildJobPreviewInput): JobBuildPreview {
-  const { patches, prunedSpec, storyFormat = "none", tokenCss } = input;
+  const { patches, prunedSpec, storyFormat = "none", tokenCss, tokenCatalog } = input;
   const storyPatch = patches.find(
     (patch) => patch.action !== "delete" && patch.content && STORY_FILE_RE.test(patch.path),
   );
@@ -28,20 +61,30 @@ export function buildJobPreview(input: BuildJobPreviewInput): JobBuildPreview {
     ) ?? patches.find((patch) => patch.action !== "delete" && patch.content && COMPONENT_FILE_RE.test(patch.path));
 
   const storyExport = storyPatch?.content ? extractStoryExportName(storyPatch.content) : undefined;
+  const componentContent = normalizePatchContent(componentPatch?.content, tokenCss, tokenCatalog);
+  const storyContent = normalizePatchContent(storyPatch?.content, tokenCss, tokenCatalog);
+  const previewMetadata = componentContent
+    ? extractExistingPreviewMetadata(componentContent, storyContent)
+    : null;
+  const extractedVariants = previewMetadata?.variants ?? {};
+  const hasExtractedVariants = Object.keys(extractedVariants).length > 0;
 
   return {
     componentName: prunedSpec.name,
     storyFormat,
     storyPath: storyPatch?.path,
-    storyContent: storyPatch?.content,
+    storyContent,
     componentPath: componentPatch?.path,
-    componentContent: componentPatch?.content,
-    variantLabel: formatVariantLabel(prunedSpec, storyExport),
-    variants: prunedSpec.variants,
+    componentContent,
+    variantLabel: hasExtractedVariants
+      ? previewMetadata!.variantLabel
+      : formatVariantLabel(prunedSpec, storyExport),
+    variants: hasExtractedVariants ? extractedVariants : prunedSpec.variants,
+    propControls: previewMetadata?.propControls,
     files: patches.map((patch) => ({
       path: patch.path,
       action: patch.action,
-      content: patch.content,
+      content: normalizePatchContent(patch.content, tokenCss, tokenCatalog),
     })),
     tokenCss,
   };

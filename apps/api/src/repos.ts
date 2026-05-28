@@ -3,15 +3,24 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
-import type { DetectedProjectConfig, SyncConfig, TypographyCatalog, VcsConfig } from "@fig2code/spec";
+import type {
+  DetectedProjectConfig,
+  Registry,
+  ResolveComponentResponse,
+  SyncConfig,
+  TypographyCatalog,
+  VcsConfig,
+} from "@fig2code/spec";
 import {
   fixturePath,
   onboardLocalRepo,
   onboardRemoteRepo,
   buildTypographyConfigFromRemote,
   buildTokenConfigFromRemote,
+  resolveComponentBundle,
 } from "@fig2code/repo";
-import { createGitHostProvider, GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
+import { createGitHostProvider, defaultBranch, GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
+import { createBundleStore, type BundleStore } from "./bundle-store.js";
 
 export interface ConnectRequestBody {
   vcs: VcsConfig;
@@ -28,8 +37,13 @@ export interface ConnectResponseBody {
   workspacePath: string;
 }
 
-export function createReposRouter(): Hono {
+export interface ReposRouterOptions {
+  bundleStore?: BundleStore;
+}
+
+export function createReposRouter(options: ReposRouterOptions = {}): Hono {
   const app = new Hono();
+  const bundleStore = options.bundleStore ?? createBundleStore();
 
   app.post("/refs", async (c) => {
     let provider: string | undefined;
@@ -165,6 +179,72 @@ export function createReposRouter(): Hono {
     return c.json(result);
   });
 
+  app.post("/resolve-component", async (c) => {
+    let provider: string | undefined;
+    try {
+      const raw = (await c.req.json()) as ResolveComponentRequestBody;
+      const body = parseResolveComponentBody(raw);
+      provider = body.vcs.provider;
+
+      const git = createGitHostProvider(body.vcs.provider);
+      const ref = defaultBranch(body.vcs);
+      const auth = gitAuth({
+        vcs: body.vcs,
+        token: body.token,
+        atlassianEmail: body.atlassianEmail,
+      });
+
+      const readFile = async (path: string): Promise<string | null> => {
+        try {
+          return await git.readFile(body.vcs, auth, path, ref);
+        } catch (error) {
+          if (error instanceof GitHostApiError) {
+            if (error.status === 404 || error.status === 401 || error.status === 403) {
+              return null;
+            }
+          }
+          throw error;
+        }
+      };
+
+      const bundle = await resolveComponentBundle({
+        componentName: body.componentName,
+        figmaComponentKey: body.figmaComponentKey,
+        figmaNodeId: body.figmaNodeId,
+        syncConfig: body.syncConfig,
+        detected: body.detected,
+        registry: body.registry,
+        readFile,
+      });
+
+      if (!bundle) {
+        const response: ResolveComponentResponse = {
+          matched: false,
+          reason: `No matching files for "${body.componentName}" in repo`,
+        };
+        return c.json(response);
+      }
+
+      const { bundleId } = bundleStore.store(bundle);
+      const response: ResolveComponentResponse = {
+        matched: true,
+        bundleId,
+        bundle,
+      };
+      return c.json(response);
+    } catch (error) {
+      return repoError(c, error, { provider, upstream: true });
+    }
+  });
+
+  app.get("/bundles/:id", (c) => {
+    const bundle = bundleStore.get(c.req.param("id"));
+    if (!bundle) {
+      return c.json({ error: "Bundle not found or expired" }, 404);
+    }
+    return c.json({ bundle });
+  });
+
   app.get("/fixtures", (c) =>
     c.json({
       tailwind: fixturePath("tailwind-app"),
@@ -173,6 +253,41 @@ export function createReposRouter(): Hono {
   );
 
   return app;
+}
+
+interface ResolveComponentRequestBody {
+  vcs: VcsConfig;
+  token: string;
+  atlassianEmail?: string;
+  componentName: string;
+  figmaComponentKey?: string;
+  figmaNodeId?: string;
+  syncConfig: SyncConfig;
+  detected?: DetectedProjectConfig;
+  registry?: Registry;
+}
+
+function parseResolveComponentBody(raw: ResolveComponentRequestBody): ResolveComponentRequestBody {
+  if (!raw?.componentName?.trim()) {
+    throw new Error("componentName is required");
+  }
+  if (!raw?.token?.trim()) {
+    throw new Error("token is required");
+  }
+  if (!raw?.vcs?.provider) {
+    throw new Error("vcs.provider is required");
+  }
+  if (!raw?.syncConfig) {
+    throw new Error("syncConfig is required");
+  }
+
+  raw.componentName = raw.componentName.trim();
+  raw.token = raw.token.trim();
+  raw.atlassianEmail = raw.atlassianEmail?.trim() || undefined;
+  raw.vcs.baseBranch = raw.vcs.baseBranch?.trim() || "main";
+  raw.vcs.defaultPrTarget = raw.vcs.defaultPrTarget?.trim() || raw.vcs.baseBranch;
+
+  return raw;
 }
 
 function parseConnectBody(raw: unknown): ConnectRequestBody {

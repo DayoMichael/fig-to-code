@@ -4,9 +4,23 @@ export interface FilePatch {
   content?: string;
 }
 
+export interface CodegenChangeItem {
+  text: string;
+  breaking: boolean;
+  /** Actionable migration step for consumers when breaking=true. */
+  fix?: string;
+}
+
+/** Structured update changelog for component-update jobs. */
+export interface CodegenChangeSummary {
+  hasBreakingChanges: boolean;
+  changes: CodegenChangeItem[];
+}
+
 export interface CodegenOutput {
   patches: FilePatch[];
   summary?: string;
+  changeSummary?: CodegenChangeSummary;
   registryUpdates?: Record<string, unknown>;
 }
 

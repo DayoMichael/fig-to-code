@@ -7,3 +7,4 @@ export * from "./tokens.js";
 export * from "./prompt-envelope.js";
 export * from "./codegen.js";
 export * from "./jobs.js";
+export * from "./resolve-component.js";

@@ -80,6 +80,129 @@
         color: var(--figma-color-text, #111);
         margin-bottom: 8px;
       }
+      button.btn-sm {
+        width: auto;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 6px;
+        min-height: 28px;
+      }
+      button.btn-sm.is-loading {
+        min-height: 28px;
+        min-width: 72px;
+      }
+      .preview-workflow {
+        margin-top: 8px;
+      }
+      .preview-workflow.hidden {
+        display: none !important;
+      }
+      .preview-action-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        min-height: 32px;
+      }
+      .preview-action-ask {
+        flex: 0 1 0;
+        min-width: 0;
+        max-width: 0;
+        opacity: 0;
+        overflow: hidden;
+        pointer-events: none;
+        transition:
+          flex 0.24s ease,
+          max-width 0.24s ease,
+          opacity 0.18s ease;
+      }
+      .preview-action-bar.is-ask-open .preview-action-ask {
+        flex: 1 1 auto;
+        max-width: 100%;
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .preview-action-ask textarea {
+        width: 100%;
+        margin: 0;
+        min-height: 28px;
+        max-height: 72px;
+        padding: 5px 8px;
+        font-size: 11px;
+        line-height: 1.35;
+        border-radius: 6px;
+        border: 1px solid var(--figma-color-border, #e0e0e0);
+        background: var(--figma-color-bg, #fff);
+        resize: none;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .preview-action-ask textarea:focus {
+        outline: none;
+        border-color: color-mix(in srgb, var(--figma-color-bg-brand, #0d99ff) 55%, #e0e0e0);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--figma-color-bg-brand, #0d99ff) 18%, transparent);
+      }
+      .preview-action-controls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+        margin-left: auto;
+      }
+      .preview-action-bar.is-ask-open .preview-action-controls {
+        margin-left: 0;
+      }
+      .preview-action-update {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: auto;
+        white-space: nowrap;
+      }
+      .preview-action-bar.is-ask-open .preview-action-update {
+        display: none;
+      }
+      .preview-action-update.is-update {
+        background: var(--figma-color-bg-brand, #0d99ff);
+        color: var(--figma-color-text-onbrand, #fff);
+      }
+      .preview-action-update.is-update:hover:not(:disabled) {
+        background: var(--figma-color-bg-brand-hover, #0a80d8);
+      }
+      .preview-action-ask-toggle,
+      .preview-action-apply {
+        width: auto;
+        flex-shrink: 0;
+      }
+      .preview-action-ask-toggle {
+        background: var(--figma-color-bg-secondary, #f0f0f0);
+        color: var(--figma-color-text, #111);
+      }
+      .preview-action-bar.is-ask-open .preview-action-ask-toggle {
+        display: none;
+      }
+      .preview-action-apply {
+        display: none;
+        background: var(--figma-color-bg-success, #16a34a);
+        color: var(--figma-color-text-onbrand, #fff);
+      }
+      .preview-action-apply:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--figma-color-bg-success, #16a34a) 88%, #000);
+      }
+      .preview-action-bar.is-ask-open .preview-action-apply {
+        display: inline-flex;
+        animation: preview-action-reveal 0.2s ease;
+      }
+      @keyframes preview-action-reveal {
+        from {
+          opacity: 0;
+          transform: translateX(4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
       button:disabled {
         opacity: 0.45;
         cursor: not-allowed;
@@ -274,10 +397,188 @@
       .hidden {
         display: none !important;
       }
+      .match-section {
+        margin: 12px 0 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--figma-color-border, #e0e0e0);
+        border-radius: 6px;
+        background: var(--figma-color-bg-secondary, #f7f7f7);
+        opacity: 0;
+        transform: translateY(2px);
+        animation: match-section-in 160ms ease forwards;
+      }
+      @keyframes match-section-in {
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .match-skeleton {
+        margin: 12px 0 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--figma-color-border, #e0e0e0);
+        border-radius: 6px;
+        background: var(--figma-color-bg-secondary, #f7f7f7);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .match-skeleton-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 2px;
+      }
+      .match-skeleton-caption {
+        margin: 4px 0 0;
+        font-size: 11px;
+        color: var(--figma-color-text-secondary, #666);
+      }
+      .skeleton {
+        display: inline-block;
+        border-radius: 3px;
+        background: linear-gradient(
+          90deg,
+          rgba(0, 0, 0, 0.06) 0%,
+          rgba(0, 0, 0, 0.12) 50%,
+          rgba(0, 0, 0, 0.06) 100%
+        );
+        background-size: 200% 100%;
+        animation: skeleton-shimmer 1.1s linear infinite;
+      }
+      .skeleton-badge {
+        width: 48px;
+        height: 14px;
+        border-radius: 3px;
+      }
+      .skeleton-title {
+        width: 96px;
+        height: 12px;
+        border-radius: 3px;
+      }
+      .skeleton-line {
+        height: 10px;
+        border-radius: 3px;
+      }
+      .skeleton-line-1 {
+        width: 92%;
+      }
+      .skeleton-line-2 {
+        width: 70%;
+      }
+      .skeleton-line-3 {
+        width: 80%;
+      }
+      .skeleton-btn {
+        height: 28px;
+        width: 100%;
+        border-radius: 4px;
+        margin-top: 4px;
+      }
+      @keyframes skeleton-shimmer {
+        0% {
+          background-position: 200% 0;
+        }
+        100% {
+          background-position: -200% 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .skeleton,
+        .match-section {
+          animation: none !important;
+        }
+      }
+
+      .match-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      .match-badge {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: var(--figma-color-bg-brand, #0d99ff);
+        color: var(--figma-color-text-onbrand, #fff);
+      }
+      .match-name {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--figma-color-text, #111);
+      }
+      .match-reason {
+        margin: 0 0 6px;
+        font-size: 11px;
+        color: var(--figma-color-text-secondary, #666);
+        line-height: 1.4;
+      }
+      .match-file-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        max-height: 120px;
+        overflow-y: auto;
+      }
+      .match-file-list li {
+        padding: 2px 0;
+        color: var(--figma-color-text, #111);
+      }
+      .match-file-list .file-role {
+        font-size: 9.5px;
+        text-transform: uppercase;
+        margin-right: 6px;
+        opacity: 0.6;
+      }
       .build-preview-section {
-        margin-top: 16px;
-        padding-top: 4px;
-        border-top: 1px solid var(--figma-color-border, #e0e0e0);
+        margin-top: 12px;
+      }
+      .build-progress-indicator {
+        margin-top: 10px;
+        padding: 0;
+      }
+      .build-progress-indicator.hidden {
+        display: none;
+      }
+      .build-progress-bar {
+        height: 2px;
+        width: 100%;
+        background: var(--figma-color-border, #e0e0e0);
+        border-radius: 1px;
+        overflow: hidden;
+      }
+      .build-progress-fill {
+        height: 100%;
+        width: 40%;
+        border-radius: 1px;
+        background: #d97706;
+        animation: progress-slide 1.4s ease-in-out infinite;
+      }
+      @keyframes progress-slide {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(350%); }
+      }
+      .build-progress-text {
+        display: block;
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--figma-color-text-secondary, #888);
+        letter-spacing: 0.01em;
+      }
+
+      /* Smooth reveal for preview section */
+      .build-preview-section {
+        animation: preview-fade-in 0.25s ease-out;
+      }
+      @keyframes preview-fade-in {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
       }
       .build-preview-header {
         display: flex;
@@ -288,9 +589,11 @@
       }
       .build-preview-title {
         margin: 0;
-        font-size: 13px;
-        font-weight: 700;
-        color: var(--figma-color-text, #111);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--figma-color-text-secondary, #666);
       }
       .build-preview-header-actions {
         display: inline-flex;
@@ -346,65 +649,106 @@
         border: 1px solid var(--figma-color-border, #e0e0e0);
       }
       .build-preview-card {
-        padding: 10px;
-        border-radius: 10px;
+        padding: 8px;
+        border-radius: 8px;
         background: var(--figma-color-bg-secondary, #f5f5f5);
         border: 1px solid var(--figma-color-border, #e0e0e0);
-        margin-bottom: 10px;
       }
       .build-preview-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        margin-bottom: 8px;
+        display: none;
       }
-      .build-preview-tag {
-        display: inline-flex;
-        align-items: center;
-        padding: 3px 8px;
-        border-radius: 999px;
-        background: var(--figma-color-bg, #fff);
-        border: 1px solid var(--figma-color-border, #e0e0e0);
-        font-size: 10px;
-        font-weight: 600;
-        color: var(--figma-color-text-secondary, #666);
-      }
-      .build-preview-variant-controls {
+      .preview-controls {
         display: flex;
-        flex-wrap: wrap;
+        flex-direction: column;
         gap: 8px;
         margin-bottom: 8px;
+        padding: 8px;
+        border-radius: 6px;
+        background: var(--figma-color-bg, #fff);
+        border: 1px solid var(--figma-color-border, #e0e0e0);
+      }
+      .preview-controls-group.hidden {
+        display: none;
+      }
+      .preview-controls-heading {
+        display: block;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--figma-color-text-secondary, #888);
+        margin-bottom: 6px;
+      }
+      .preview-controls-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+        gap: 6px 8px;
+      }
+      .preview-controls-grid--booleans {
+        grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
       }
       .build-preview-variant-field {
         display: flex;
         flex-direction: column;
-        gap: 4px;
-        min-width: 120px;
+        gap: 3px;
+        min-width: 0;
       }
       .build-preview-variant-field span {
-        font-size: 10px;
+        font-size: 9px;
         font-weight: 600;
-        color: var(--figma-color-text-secondary, #666);
+        color: var(--figma-color-text-secondary, #777);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
-      .build-preview-variant-field select {
+      .build-preview-variant-field select,
+      .build-preview-variant-field input[type="text"],
+      .build-preview-variant-field input[type="number"] {
         font: inherit;
         font-size: 11px;
-        padding: 5px 8px;
-        border-radius: 6px;
+        padding: 4px 7px;
+        border-radius: 5px;
         border: 1px solid var(--figma-color-border, #e0e0e0);
-        background: var(--figma-color-bg, #fff);
+        background: var(--figma-color-bg-secondary, #fafafa);
         color: var(--figma-color-text, #111);
+        width: 100%;
+      }
+      .build-preview-variant-field input[type="checkbox"] {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: var(--figma-color-bg-brand, #0d99ff);
+      }
+      .build-preview-boolean-field {
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+      }
+      .build-preview-boolean-field span {
+        margin: 0;
       }
       .build-preview-visual {
         display: flex;
         align-items: center;
         justify-content: center;
-        min-height: 120px;
-        padding: 12px;
+        min-height: 100px;
+        padding: 8px;
         border-radius: 6px;
         background: var(--figma-color-bg, #fff);
         border: 1px solid var(--figma-color-border, #e0e0e0);
         overflow: hidden;
+        position: relative;
+      }
+      .build-preview-visual.is-busy::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: color-mix(in srgb, var(--figma-color-bg, #fff) 55%, transparent);
+        pointer-events: none;
+        z-index: 1;
+      }
+      .build-preview-visual.is-busy iframe {
+        opacity: 0.72;
       }
       .build-preview-visual iframe {
         display: block;
@@ -426,30 +770,67 @@
       }
       .build-preview-action-log {
         margin-top: 8px;
-        padding: 8px;
+      }
+      .preview-actions-collapsible {
         border-radius: 6px;
         background: var(--figma-color-bg, #fff);
         border: 1px solid var(--figma-color-border, #e0e0e0);
+        overflow: hidden;
+      }
+      .preview-actions-collapsible summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 8px;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--figma-color-text-secondary, #666);
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+      }
+      .preview-actions-collapsible summary::-webkit-details-marker {
+        display: none;
+      }
+      .preview-actions-collapsible summary::before {
+        content: "▸";
+        font-size: 9px;
+        margin-right: 4px;
+        transition: transform 0.12s ease;
+      }
+      .preview-actions-collapsible[open] summary::before {
+        transform: rotate(90deg);
+      }
+      .preview-actions-count {
+        font-size: 9px;
+        font-weight: 500;
+        color: var(--figma-color-text-secondary, #999);
+      }
+      .preview-actions-body {
+        padding: 0 8px 8px;
+        border-top: 1px solid var(--figma-color-border, #eee);
+      }
+      .preview-actions-toolbar {
+        display: flex;
+        justify-content: flex-end;
+        padding: 4px 0 6px;
+      }
+      .preview-actions-toolbar button.link {
+        margin: 0;
+        font-size: 10px;
       }
       .build-preview-action-log-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 6px;
-        font-size: 10px;
-        font-weight: 700;
-        color: var(--figma-color-text-secondary, #666);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+        display: none;
       }
       .build-preview-action-log-list {
         list-style: none;
         margin: 0;
         padding: 0;
-        max-height: 88px;
+        max-height: 72px;
         overflow: auto;
-        font-size: 11px;
-        line-height: 1.45;
+        font-size: 10px;
+        line-height: 1.4;
       }
       .build-preview-action-log-list li {
         padding: 3px 0;
@@ -463,9 +844,161 @@
         font-size: 10px;
         color: var(--figma-color-text, #111);
       }
-      .build-preview-action-empty {
+      .correction-stream-shell {
+        position: relative;
+        margin-top: 6px;
+      }
+      .correction-stream-shell:has(.correction-stream:empty) {
+        display: none;
+      }
+      .correction-stream {
+        min-height: 0;
+        max-height: 160px;
+        overflow-y: auto;
+        margin-top: 0;
+        padding: 0 2px 4px;
+        scrollbar-width: thin;
+      }
+      .correction-stream:empty {
+        display: none;
+      }
+      .correction-stream-fade {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 28px;
+        background: linear-gradient(
+          to bottom,
+          color-mix(in srgb, var(--figma-color-bg, #fff) 0%, transparent),
+          var(--figma-color-bg, #fff) 78%
+        );
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+      .correction-stream-shell.is-scrollable .correction-stream-fade {
+        opacity: 1;
+      }
+      .correction-stream-line {
+        font-size: 10px;
+        line-height: 1.45;
+        color: var(--figma-color-text-secondary, #888);
+        margin: 0 0 4px;
+        opacity: 0.85;
+      }
+      .correction-stream-line.is-active {
+        opacity: 1;
+        color: var(--figma-color-text, #333);
+      }
+      .correction-stream-line.is-faded {
+        opacity: 0.55;
+      }
+      .correction-stream-cursor {
+        display: inline-block;
+        width: 5px;
+        height: 11px;
+        margin-left: 1px;
+        vertical-align: -1px;
+        background: color-mix(in srgb, var(--figma-color-text-secondary, #888) 60%, transparent);
+        animation: correction-cursor-blink 1s step-end infinite;
+      }
+      .correction-summary {
+        margin-top: 2px;
+      }
+      .correction-summary.is-error .correction-summary-heading {
+        color: #b91c1c;
+      }
+      .correction-summary-heading {
+        margin: 0 0 4px;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--figma-color-text-secondary, #888);
+      }
+      .correction-change-banner {
+        margin: 0 0 6px;
+        padding: 5px 8px;
+        border-radius: 5px;
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1.35;
+      }
+      .correction-change-banner.is-safe {
+        background: #f0fdf4;
+        color: #166534;
+        border: 1px solid #bbf7d0;
+      }
+      .correction-change-banner.is-breaking {
+        background: #fefce8;
+        color: #92400e;
+        border: 1px solid #fde68a;
+      }
+      .correction-summary-list {
+        margin: 0;
+        padding: 0 0 0 14px;
+        list-style: disc;
+      }
+      .correction-summary-item {
+        font-size: 10px;
+        line-height: 1.45;
+        color: var(--figma-color-text, #333);
+        margin: 0 0 4px;
+        opacity: 0;
+        transform: translateY(2px);
+        transition: opacity 0.18s ease, transform 0.18s ease;
+      }
+      .correction-summary-item.is-visible {
+        opacity: 0.92;
+        transform: translateY(0);
+      }
+      .correction-summary-item.is-breaking {
+        list-style: none;
+        background: #fef9c3;
+        color: #713f12;
+        border-radius: 4px;
+        padding: 4px 6px 4px 6px;
+        margin-left: -14px;
+      }
+      .correction-summary-item.is-breaking.is-visible {
+        opacity: 1;
+      }
+      .correction-summary-issue {
+        display: block;
+      }
+      .correction-summary-fix {
+        display: block;
+        margin-top: 3px;
+        font-size: 9px;
+        line-height: 1.4;
+        color: #92400e;
+      }
+      .correction-summary-fix-label {
+        font-weight: 700;
+      }
+      .correction-summary.is-error .correction-summary-item {
+        color: #b91c1c;
+      }
+      @keyframes correction-cursor-blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      .build-preview-tag {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--figma-color-bg, #fff);
+        border: 1px solid var(--figma-color-border, #e0e0e0);
+        font-size: 10px;
+        font-weight: 600;
         color: var(--figma-color-text-secondary, #666);
-        font-size: 11px;
+      }
+      .build-preview-action-empty {
+        color: var(--figma-color-text-secondary, #888);
+        font-size: 10px;
       }
       .code-workbench {
         display: grid;
@@ -518,6 +1051,27 @@
       .file-badge.delete {
         background: rgba(239, 83, 80, 0.18);
         color: #ef9a9a;
+      }
+      .file-badge.component {
+        background: rgba(96, 165, 250, 0.18);
+        color: #93c5fd;
+      }
+      .file-badge.story {
+        background: rgba(251, 146, 60, 0.18);
+        color: #fdba74;
+      }
+      .file-badge.test {
+        background: rgba(74, 222, 128, 0.18);
+        color: #86efac;
+      }
+      .file-badge.barrel {
+        background: rgba(167, 139, 250, 0.18);
+        color: #c4b5fd;
+      }
+      .file-badge.code-connect,
+      .file-badge.related {
+        background: rgba(148, 163, 184, 0.18);
+        color: #cbd5e1;
       }
       .build-preview-file-tree {
         margin: 0;
@@ -1026,7 +1580,25 @@
           </button>
         </div>
 
-        <button id="push" type="button" disabled data-label="Build component">Build component</button>
+        <div id="match-skeleton" class="match-skeleton hidden" aria-live="polite" aria-busy="true">
+          <div class="match-skeleton-header">
+            <span class="skeleton skeleton-badge"></span>
+            <span class="skeleton skeleton-title"></span>
+          </div>
+          <span class="skeleton skeleton-line skeleton-line-1"></span>
+          <span class="skeleton skeleton-line skeleton-line-2"></span>
+          <span class="skeleton skeleton-line skeleton-line-3"></span>
+          <p class="match-skeleton-caption">Checking your repo for this component…</p>
+        </div>
+
+        <div id="match-section" class="match-section hidden" aria-live="polite">
+          <div class="match-header">
+            <span class="match-badge" id="match-badge">In repo</span>
+            <span class="match-name" id="match-name"></span>
+          </div>
+          <p class="match-reason" id="match-reason"></p>
+          <ul id="match-file-list" class="match-file-list"></ul>
+        </div>
 
         <div id="build-preview-section" class="build-preview-section hidden">
           <div class="build-preview-header">
@@ -1061,27 +1633,45 @@
                 <span id="build-preview-format" class="build-preview-tag">Storybook CSF3</span>
                 <span id="build-preview-variant" class="build-preview-tag">Default</span>
               </div>
-              <div id="build-preview-variant-controls" class="build-preview-variant-controls hidden"></div>
+              <div id="build-preview-controls" class="preview-controls hidden">
+                <div id="preview-select-group" class="preview-controls-group hidden">
+                  <span class="preview-controls-heading">Dropdowns</span>
+                  <div id="build-preview-select-controls" class="preview-controls-grid"></div>
+                </div>
+                <div id="preview-input-group" class="preview-controls-group hidden">
+                  <span class="preview-controls-heading">Fields</span>
+                  <div id="build-preview-input-controls" class="preview-controls-grid"></div>
+                </div>
+                <div id="preview-boolean-group" class="preview-controls-group hidden">
+                  <span class="preview-controls-heading">Toggles</span>
+                  <div id="build-preview-boolean-controls" class="preview-controls-grid preview-controls-grid--booleans"></div>
+                </div>
+              </div>
               <div id="build-preview-visual" class="build-preview-visual">
                 <iframe
                   id="build-preview-frame"
                   class="hidden"
-                  title="Generated Storybook preview"
+                  title="Component preview"
                   sandbox="allow-scripts allow-same-origin"
                 ></iframe>
                 <p id="build-preview-empty" class="build-preview-empty hidden">
-                  Storybook preview will appear after a successful build.
+                  Preview will appear after a successful build.
                 </p>
               </div>
-              <div class="build-preview-action-log">
-                <div class="build-preview-action-log-header">
+              <details id="preview-actions-details" class="preview-actions-collapsible build-preview-action-log">
+                <summary>
                   <span>Actions</span>
-                  <button id="clear-preview-actions" class="link btn-inline" type="button">Clear</button>
+                  <span id="preview-actions-count" class="preview-actions-count"></span>
+                </summary>
+                <div class="preview-actions-body">
+                  <div class="preview-actions-toolbar">
+                    <button id="clear-preview-actions" class="link btn-inline" type="button">Clear</button>
+                  </div>
+                  <ul id="build-preview-action-log" class="build-preview-action-log-list">
+                    <li class="build-preview-action-empty">Interact with the component to log events.</li>
+                  </ul>
                 </div>
-                <ul id="build-preview-action-log" class="build-preview-action-log-list">
-                  <li class="build-preview-action-empty">Interact with the component to log events.</li>
-                </ul>
-              </div>
+              </details>
             </div>
 
             <div id="build-preview-code-pane" class="build-preview-pane hidden">
@@ -1120,16 +1710,51 @@
             </div>
           </div>
 
-          <label for="build-corrections">Corrections</label>
-          <textarea
-            id="build-corrections"
-            rows="3"
-            placeholder="Describe what to fix before rebuilding, e.g. use rounded-full for pill buttons."
-          ></textarea>
-          <button id="rebuild-with-corrections" class="secondary" type="button" data-label="Rebuild with corrections">
-            Rebuild with corrections
-          </button>
-          <p class="muted">Renders the generated Storybook story in your browser. Styling may differ slightly from your repo setup.</p>
+          <div id="preview-workflow" class="preview-workflow hidden">
+            <div id="preview-action-bar" class="preview-action-bar">
+              <div class="preview-action-ask">
+                <textarea
+                  id="build-corrections"
+                  rows="1"
+                  placeholder="Ask for a change to the code…"
+                  title="Enter to apply · edits use current preview code as context"
+                  aria-label="Ask for a code change"
+                ></textarea>
+              </div>
+              <div class="preview-action-controls">
+                <button
+                  id="push"
+                  type="button"
+                  class="preview-action-update btn-sm"
+                  disabled
+                  data-label="Build component"
+                >
+                  <span id="push-label">Build component</span>
+                </button>
+                <button
+                  id="toggle-ask"
+                  type="button"
+                  class="preview-action-ask-toggle btn-sm"
+                  hidden
+                  data-label="Ask"
+                >
+                  Ask
+                </button>
+                <button
+                  id="rebuild-with-corrections"
+                  type="button"
+                  class="preview-action-apply btn-sm"
+                  data-label="Apply"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+            <div id="correction-stream-shell" class="correction-stream-shell">
+              <div id="correction-stream" class="correction-stream" aria-live="polite"></div>
+              <div id="correction-stream-fade" class="correction-stream-fade" aria-hidden="true"></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -656,8 +656,63 @@ export function replaceArbitraryTailwindColors(
 
   const pattern = new RegExp(`\\b(${TAILWIND_COLOR_UTILITIES})-\\[([^\\]]+)\\]`, "g");
   return source.replace(pattern, (match, utilityPrefix: string, rawColor: string) => {
+    if (rawColor.startsWith("var(--")) {
+      return match;
+    }
     return resolveTailwindColorClass(utilityPrefix, rawColor, catalog) ?? match;
   });
+}
+
+const TAILWIND_VARIANT_PREFIX =
+  "(?:hover|focus|focus-visible|focus-within|active|disabled|group-hover|peer-hover|peer-focus|data-\\[[^\\]]+\\]):";
+
+/** Collect CSS custom property names declared or referenced in token CSS. */
+export function collectCssVariableNamesFromCss(tokenCss: string): string[] {
+  const names = new Set<string>();
+
+  for (const match of tokenCss.matchAll(/--([\w-]+)\s*:/g)) {
+    names.add(match[1]!);
+  }
+
+  for (const match of tokenCss.matchAll(/var\(--([\w-]+)\)/g)) {
+    names.add(match[1]!);
+  }
+
+  return [...names];
+}
+
+/**
+ * Convert Tailwind arbitrary CSS-var utilities (e.g. `hover:bg-[var(--k-color-foo)]`)
+ * into semantic token classes (`hover:bg-k-color-foo`) when the variable exists in
+ * team token CSS. Fig2Code preview extends Tailwind colors from those variables.
+ */
+export function replaceArbitraryCssVarClasses(
+  source: string,
+  tokenCss: string | undefined,
+): string {
+  if (!tokenCss?.trim()) {
+    return source;
+  }
+
+  const varNames = new Set(collectCssVariableNamesFromCss(tokenCss));
+  if (varNames.size === 0) {
+    return source;
+  }
+
+  const pattern = new RegExp(
+    `(${TAILWIND_VARIANT_PREFIX})?(${TAILWIND_COLOR_UTILITIES})-\\[var\\(--([\\w-]+)\\)\\]`,
+    "g",
+  );
+
+  return source.replace(
+    pattern,
+    (match, variantPrefix: string | undefined, utilityPrefix: string, varName: string) => {
+      if (!varNames.has(varName)) {
+        return match;
+      }
+      return `${variantPrefix ?? ""}${utilityPrefix}-${varName}`;
+    },
+  );
 }
 
 function colorChannelDistance(hexA: string, hexB: string): number {
