@@ -11,6 +11,8 @@ export type FileNaming = "PascalCase" | "kebab-case" | "camelCase";
 export type TestFramework = "vitest" | "jest" | "none";
 export type StoryFormat = "csf3" | "csf2" | "none";
 export type Platform = "web" | "native";
+/** How generated patches are formatted before preview/PR. */
+export type FormatterPreference = "auto" | "prettier" | "none";
 export type TokenFormat =
   | "tailwind-config"
   | "css-variables"
@@ -46,6 +48,7 @@ export interface DetectedProjectConfig {
   fileNaming: FileNaming;
   testFramework: TestFramework;
   storyFormat: StoryFormat;
+  formatter: FormatterPreference;
   hasCodeConnect: boolean;
   platforms: Platform[];
   existingComponents: ExistingComponentSummary[];

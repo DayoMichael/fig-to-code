@@ -107,6 +107,9 @@ importers:
       '@fig2code/spec':
         specifier: workspace:*
         version: link:../spec
+      prettier:
+        specifier: ^3.5.3
+        version: 3.8.3
     devDependencies:
       tsx:
         specifier: ^4.19.4
@@ -563,6 +566,11 @@ packages:
     resolution: {integrity: sha512-eIaZ9qDgu7XV0pxOCrg7/WhnQ6Ivm22UcxhXx/A3dcbqbbYgBEkc6e/J/s7j2tS96zoB0S9VBdLwQNCWwUo4LA==}
     engines: {node: '>=16.9.0'}
 
+  prettier@3.8.3:
+    resolution: {integrity: sha512-7igPTM53cGHMW8xWuVTydi2KO233VFiTNyF5hLJqpilHfmn8C8gPf+PS7dUT64YcXFbiMGZxS9pCSxL/Dxm/Jw==}
+    engines: {node: '>=14'}
+    hasBin: true
+
   tsx@4.22.3:
     resolution: {integrity: sha512-mdoNxBC/cSQObGGVQ5Bpn5i+yv7j68gk3Nfm3wFjcJg3Z0Mix9jzAFfP12prmm5eVGmDKtp0yyArrs0Q+8gZHg==}
     engines: {node: '>=18.0.0'}
@@ -841,6 +849,8 @@ snapshots:
     optional: true
 
   hono@4.12.23: {}
+
+  prettier@3.8.3: {}
 
   tsx@4.22.3:
     dependencies:

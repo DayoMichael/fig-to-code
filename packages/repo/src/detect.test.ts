@@ -25,6 +25,20 @@ describe("detectProjectConfig", () => {
     return dir;
   }
 
+  it("detects prettier from config files and dependencies", async () => {
+    const rootDir = await makeRepo({
+      "package.json": JSON.stringify({
+        name: "root",
+        devDependencies: { prettier: "^3.0.0" },
+      }),
+      ".prettierrc.json": JSON.stringify({ singleQuote: true }),
+      "src/components/Button.tsx": "export const Button = () => null;\n",
+    });
+
+    const detected = await detectProjectConfig({ rootDir });
+    assert.equal(detected.formatter, "prettier");
+  });
+
   it("finds jest in workspace packages and test files", async () => {
     const rootDir = await makeRepo({
       "package.json": JSON.stringify({ name: "root", private: true }),

@@ -158,6 +158,20 @@ export async function hydrateCodegenContext(
     llmProvider: options.llmProvider,
     intent: payload.intent,
     existingFiles,
+    formatContext: {
+      formatter: payload.syncConfig.conventions.formatter ?? "auto",
+      readFile: async (path: string) => {
+        try {
+          return await git.readFile(payload.vcs, auth, path, payload.vcs.baseBranch);
+        } catch {
+          return null;
+        }
+      },
+      existingFiles: existingFiles?.files.map((file) => ({
+        path: file.path,
+        content: file.content,
+      })),
+    },
   };
 }
 

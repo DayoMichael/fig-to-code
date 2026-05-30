@@ -104,6 +104,7 @@ describe("resolveComponentBundle", () => {
       fileNaming: "PascalCase",
       testFramework: "vitest",
       storyFormat: "csf3",
+      formatter: "none",
       hasCodeConnect: false,
       platforms: ["web"],
       existingComponents: [

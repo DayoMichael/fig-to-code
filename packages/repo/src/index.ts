@@ -2,6 +2,7 @@ export {
   buildRegistryHints,
   buildRepoIndex,
   detectProjectConfig,
+  detectFormatterFromIndex,
   detectedConfigToSyncConfig,
   loadRegistryFromWorkspace,
   loadSyncConfigFromWorkspace,

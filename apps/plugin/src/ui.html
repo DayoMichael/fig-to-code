@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -135,12 +135,23 @@
         border: 1px solid var(--figma-color-border, #e0e0e0);
         background: var(--figma-color-bg, #fff);
         resize: none;
-        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease;
       }
       .preview-action-ask textarea:focus {
         outline: none;
-        border-color: color-mix(in srgb, var(--figma-color-bg-brand, #0d99ff) 55%, #e0e0e0);
-        box-shadow: 0 0 0 2px color-mix(in srgb, var(--figma-color-bg-brand, #0d99ff) 18%, transparent);
+        border-color: color-mix(
+          in srgb,
+          var(--figma-color-bg-brand, #0d99ff) 55%,
+          #e0e0e0
+        );
+        box-shadow: 0 0 0 2px
+          color-mix(
+            in srgb,
+            var(--figma-color-bg-brand, #0d99ff) 18%,
+            transparent
+          );
       }
       .preview-action-controls {
         display: flex;
@@ -187,7 +198,11 @@
         color: var(--figma-color-text-onbrand, #fff);
       }
       .preview-action-apply:hover:not(:disabled) {
-        background: color-mix(in srgb, var(--figma-color-bg-success, #16a34a) 88%, #000);
+        background: color-mix(
+          in srgb,
+          var(--figma-color-bg-success, #16a34a) 88%,
+          #000
+        );
       }
       .preview-action-bar.is-ask-open .preview-action-apply {
         display: inline-flex;
@@ -1816,7 +1831,11 @@
         background: var(--figma-color-bg-success, #e8f7ee);
         color: var(--figma-color-text, #111);
         border: 1px solid
-          color-mix(in srgb, var(--figma-color-icon-success, #16a34a) 22%, transparent);
+          color-mix(
+            in srgb,
+            var(--figma-color-icon-success, #16a34a) 22%,
+            transparent
+          );
         font-size: 11px;
         font-weight: 600;
         margin-bottom: 12px;
@@ -1899,7 +1918,11 @@
         height: 28px;
         background: linear-gradient(
           to bottom,
-          color-mix(in srgb, var(--figma-color-bg-secondary, #f5f5f5) 0%, transparent),
+          color-mix(
+            in srgb,
+            var(--figma-color-bg-secondary, #f5f5f5) 0%,
+            transparent
+          ),
           var(--figma-color-bg-secondary, #f5f5f5) 78%
         );
         pointer-events: none;
@@ -2083,8 +2106,12 @@
         animation: progress-slide 1.4s ease-in-out infinite;
       }
       @keyframes progress-slide {
-        0% { transform: translateX(-100%); }
-        100% { transform: translateX(350%); }
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(350%);
+        }
       }
       .build-progress-text {
         display: block;
@@ -2099,8 +2126,14 @@
         animation: preview-fade-in 0.25s ease-out;
       }
       @keyframes preview-fade-in {
-        from { opacity: 0; transform: translateY(6px); }
-        to { opacity: 1; transform: translateY(0); }
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
       .build-preview-header {
         display: flex;
@@ -2146,11 +2179,19 @@
       .icon-btn.active {
         background: var(--figma-color-bg-selected, #daebf7);
         color: var(--figma-color-text-brand, #0d99ff);
-        border-color: color-mix(in srgb, var(--figma-color-text-brand, #0d99ff) 35%, #e0e0e0);
+        border-color: color-mix(
+          in srgb,
+          var(--figma-color-text-brand, #0d99ff) 35%,
+          #e0e0e0
+        );
       }
       .icon-btn-brand {
         color: #18a0fb;
-        border-color: color-mix(in srgb, #18a0fb 28%, var(--figma-color-border, #e0e0e0));
+        border-color: color-mix(
+          in srgb,
+          #18a0fb 28%,
+          var(--figma-color-border, #e0e0e0)
+        );
       }
       .icon-btn-brand:hover:not(:disabled) {
         color: #0d8de8;
@@ -2284,7 +2325,11 @@
         content: "";
         position: absolute;
         inset: 0;
-        background: color-mix(in srgb, var(--figma-color-bg, #fff) 55%, transparent);
+        background: color-mix(
+          in srgb,
+          var(--figma-color-bg, #fff) 55%,
+          transparent
+        );
         pointer-events: none;
         z-index: 1;
       }
@@ -2441,7 +2486,11 @@
         height: 11px;
         margin-left: 1px;
         vertical-align: -1px;
-        background: color-mix(in srgb, var(--figma-color-text-secondary, #888) 60%, transparent);
+        background: color-mix(
+          in srgb,
+          var(--figma-color-text-secondary, #888) 60%,
+          transparent
+        );
         animation: correction-cursor-blink 1s step-end infinite;
       }
       .correction-summary {
@@ -2488,7 +2537,9 @@
         margin: 0 0 4px;
         opacity: 0;
         transform: translateY(2px);
-        transition: opacity 0.18s ease, transform 0.18s ease;
+        transition:
+          opacity 0.18s ease,
+          transform 0.18s ease;
       }
       .correction-summary-item.is-visible {
         opacity: 0.92;
@@ -2759,15 +2810,34 @@
         white-space: pre;
         color: #a6accd;
       }
-      .tok-keyword { color: #c792ea; }
-      .tok-string { color: #c3e88d; }
-      .tok-comment { color: #546e7a; font-style: italic; }
-      .tok-number { color: #f78c6c; }
-      .tok-type { color: #ffcb6b; }
-      .tok-tag { color: #f07178; }
-      .tok-property { color: #82aaff; }
-      .tok-punctuation { color: #89ddff; }
-      .tok-plain { color: #a6accd; }
+      .tok-keyword {
+        color: #c792ea;
+      }
+      .tok-string {
+        color: #c3e88d;
+      }
+      .tok-comment {
+        color: #546e7a;
+        font-style: italic;
+      }
+      .tok-number {
+        color: #f78c6c;
+      }
+      .tok-type {
+        color: #ffcb6b;
+      }
+      .tok-tag {
+        color: #f07178;
+      }
+      .tok-property {
+        color: #82aaff;
+      }
+      .tok-punctuation {
+        color: #89ddff;
+      }
+      .tok-plain {
+        color: #a6accd;
+      }
       .code-layer {
         position: relative;
         display: grid;
@@ -2915,10 +2985,15 @@
   </head>
   <body>
     <h1>Fig2Code</h1>
-    <noscript><p class="muted">JavaScript is required for this plugin UI.</p></noscript>
+    <noscript
+      ><p class="muted">JavaScript is required for this plugin UI.</p></noscript
+    >
 
     <div id="connect-screen">
-      <p class="muted">Connect your team's repo. Your git token stays in this Figma session only.</p>
+      <p class="muted">
+        Connect your team's repo. Your git token stays in this Figma session
+        only.
+      </p>
 
       <h2>Backend</h2>
       <label for="api-base">API URL</label>
@@ -2933,10 +3008,20 @@
 
       <div id="provider-fields">
         <label id="label-slug-a" for="slug-a">Owner</label>
-        <input id="slug-a" type="text" placeholder="acme-team" autocomplete="off" />
+        <input
+          id="slug-a"
+          type="text"
+          placeholder="acme-team"
+          autocomplete="off"
+        />
 
         <label for="slug-b">Repository</label>
-        <input id="slug-b" type="text" placeholder="design-system" autocomplete="off" />
+        <input
+          id="slug-b"
+          type="text"
+          placeholder="design-system"
+          autocomplete="off"
+        />
       </div>
 
       <div id="bitbucket-fields" class="hidden">
@@ -2948,16 +3033,27 @@
           autocomplete="off"
         />
         <p class="muted">
-          Required for API tokens — use the email from Bitbucket → Personal settings → Email aliases
-          (not your Bitbucket username). Token needs Repository: Read scope.
-          Create at id.atlassian.com → Security → API tokens. Leave blank only for repository access tokens.
+          Required for API tokens — use the email from Bitbucket → Personal
+          settings → Email aliases (not your Bitbucket username). Token needs
+          Repository: Read scope. Create at id.atlassian.com → Security → API
+          tokens. Leave blank only for repository access tokens.
         </p>
       </div>
 
       <label for="token">Git access token</label>
-      <input id="token" type="password" placeholder="GitHub PAT or Bitbucket API token" autocomplete="off" />
+      <input
+        id="token"
+        type="password"
+        placeholder="GitHub PAT or Bitbucket API token"
+        autocomplete="off"
+      />
 
-      <button id="load-branches" class="secondary" type="button" data-label="Load branches">
+      <button
+        id="load-branches"
+        class="secondary"
+        type="button"
+        data-label="Load branches"
+      >
         Load branches
       </button>
 
@@ -2977,10 +3073,13 @@
       </div>
 
       <p class="muted" style="margin-top: 8px">
-        Base branch is cloned for detection. PR target is where generated PRs merge.
+        Base branch is cloned for detection. PR target is where generated PRs
+        merge.
       </p>
 
-      <button id="connect" type="button" data-label="Connect &amp; scan">Connect &amp; scan</button>
+      <button id="connect" type="button" data-label="Connect &amp; scan">
+        Connect &amp; scan
+      </button>
     </div>
 
     <div id="main-screen" class="hidden">
@@ -3000,9 +3099,17 @@
 
       <div id="setup-form-section">
         <h2>Project setup</h2>
-        <p class="muted">Review auto-detected values, then save before pushing components.</p>
+        <p class="muted">
+          Review auto-detected values, then save before pushing components.
+        </p>
 
-        <button id="rescan" class="secondary" type="button" data-label="Rerun detection" style="margin-bottom: 12px">
+        <button
+          id="rescan"
+          class="secondary"
+          type="button"
+          data-label="Rerun detection"
+          style="margin-bottom: 12px"
+        >
           Rerun detection
         </button>
 
@@ -3016,16 +3123,36 @@
         </select>
 
         <label for="setup-component-path">Component path</label>
-        <input id="setup-component-path" type="text" placeholder="packages/ui/src" autocomplete="off" />
+        <input
+          id="setup-component-path"
+          type="text"
+          placeholder="packages/ui/src"
+          autocomplete="off"
+        />
 
         <label for="setup-token-path">Token paths (comma-separated)</label>
-        <input id="setup-token-path" type="text" placeholder="tailwind.config.ts, src/tokens/colors.css" autocomplete="off" />
+        <input
+          id="setup-token-path"
+          type="text"
+          placeholder="tailwind.config.ts, src/tokens/colors.css"
+          autocomplete="off"
+        />
 
         <label for="setup-icon-path">Icon path</label>
-        <input id="setup-icon-path" type="text" placeholder="src/icons" autocomplete="off" />
+        <input
+          id="setup-icon-path"
+          type="text"
+          placeholder="src/icons"
+          autocomplete="off"
+        />
 
         <label for="setup-font-paths">Font paths (comma-separated)</label>
-        <input id="setup-font-paths" type="text" placeholder="src/fonts, src/tokens/typography" autocomplete="off" />
+        <input
+          id="setup-font-paths"
+          type="text"
+          placeholder="src/fonts, src/tokens/typography"
+          autocomplete="off"
+        />
 
         <div class="row">
           <div>
@@ -3071,7 +3198,14 @@
           placeholder="e.g. Components live under packages/ui/src/primitives. Use CSS variables from theme.css."
         ></textarea>
 
-        <button id="save-setup" class="secondary" type="button" data-label="Save setup">Save setup</button>
+        <button
+          id="save-setup"
+          class="secondary"
+          type="button"
+          data-label="Save setup"
+        >
+          Save setup
+        </button>
       </div>
 
       <div id="ready-section" class="hidden">
@@ -3087,15 +3221,27 @@
               data-label="Edit setup"
             ></button>
           </div>
-          <div id="project-details-body" class="project-details-body collapsed" role="button" tabindex="0" aria-expanded="false">
+          <div
+            id="project-details-body"
+            class="project-details-body collapsed"
+            role="button"
+            tabindex="0"
+            aria-expanded="false"
+          >
             <div id="setup-preview" class="project-details-content"></div>
             <div class="project-details-fade" aria-hidden="true"></div>
           </div>
         </div>
 
         <h2>Model</h2>
-        <div id="llm-summary-row" class="connected-header" style="margin-bottom: 4px">
-          <p class="muted" id="llm-summary-text" style="margin: 0; flex: 1">LLM not configured</p>
+        <div
+          id="llm-summary-row"
+          class="connected-header"
+          style="margin-bottom: 4px"
+        >
+          <p class="muted" id="llm-summary-text" style="margin: 0; flex: 1">
+            LLM not configured
+          </p>
           <button
             id="edit-llm"
             class="icon-btn icon-btn-brand"
@@ -3113,15 +3259,33 @@
           </select>
 
           <label for="llm-token">LLM API key</label>
-          <input id="llm-token" type="password" placeholder="sk-ant-api03-..." autocomplete="off" />
-          <p class="muted">Anthropic key from console.anthropic.com — not your git token or OpenAI key.</p>
+          <input
+            id="llm-token"
+            type="password"
+            placeholder="sk-ant-api03-..."
+            autocomplete="off"
+          />
+          <p class="muted">
+            Anthropic key from console.anthropic.com — not your git token or
+            OpenAI key.
+          </p>
 
-          <button id="save-llm" class="secondary" type="button" data-label="Save LLM settings">
+          <button
+            id="save-llm"
+            class="secondary"
+            type="button"
+            data-label="Save LLM settings"
+          >
             Save LLM settings
           </button>
         </div>
 
-        <div id="match-skeleton" class="match-skeleton hidden" aria-live="polite" aria-busy="true">
+        <div
+          id="match-skeleton"
+          class="match-skeleton hidden"
+          aria-live="polite"
+          aria-busy="true"
+        >
           <div class="match-skeleton-header">
             <span class="skeleton skeleton-badge"></span>
             <span class="skeleton skeleton-title"></span>
@@ -3129,7 +3293,9 @@
           <span class="skeleton skeleton-line skeleton-line-1"></span>
           <span class="skeleton skeleton-line skeleton-line-2"></span>
           <span class="skeleton skeleton-line skeleton-line-3"></span>
-          <p class="match-skeleton-caption">Checking your repo for this component…</p>
+          <p class="match-skeleton-caption">
+            Checking your repo for this component…
+          </p>
         </div>
 
         <div id="match-section" class="match-section hidden" aria-live="polite">
@@ -3145,10 +3311,15 @@
           <div class="build-preview-header">
             <h2 class="build-preview-title">Preview</h2>
             <p class="build-preview-hint">
-              Best for atomic components. Compound and layout blocks may need story defaults or render partially.
+              Best for atomic components. Compound and layout blocks may need
+              story defaults or render partially.
             </p>
             <div class="build-preview-header-actions">
-              <div class="build-preview-mode-toggle" role="tablist" aria-label="Preview mode">
+              <div
+                class="build-preview-mode-toggle"
+                role="tablist"
+                aria-label="Preview mode"
+              >
                 <button
                   id="build-preview-mode-preview"
                   class="icon-btn active"
@@ -3168,28 +3339,59 @@
                   title="Code"
                 ></button>
               </div>
-              <button id="expand-preview" class="icon-btn" type="button" aria-label="Expand" title="Expand"></button>
+              <button
+                id="expand-preview"
+                class="icon-btn"
+                type="button"
+                aria-label="Expand"
+                title="Expand"
+              ></button>
             </div>
           </div>
           <div class="build-preview-card">
             <div id="build-preview-preview-pane" class="build-preview-pane">
               <div class="build-preview-meta">
-                <span id="build-preview-format" class="build-preview-tag">Storybook CSF3</span>
-                <span id="build-preview-variant" class="build-preview-tag">Default</span>
+                <span id="build-preview-format" class="build-preview-tag"
+                  >Storybook CSF3</span
+                >
+                <span id="build-preview-variant" class="build-preview-tag"
+                  >Default</span
+                >
               </div>
-              <p id="build-preview-story-notice" class="build-preview-story-notice hidden"></p>
+              <p
+                id="build-preview-story-notice"
+                class="build-preview-story-notice hidden"
+              ></p>
               <div id="build-preview-controls" class="preview-controls hidden">
-                <div id="preview-select-group" class="preview-controls-group hidden">
+                <div
+                  id="preview-select-group"
+                  class="preview-controls-group hidden"
+                >
                   <span class="preview-controls-heading">Dropdowns</span>
-                  <div id="build-preview-select-controls" class="preview-controls-grid"></div>
+                  <div
+                    id="build-preview-select-controls"
+                    class="preview-controls-grid"
+                  ></div>
                 </div>
-                <div id="preview-input-group" class="preview-controls-group hidden">
+                <div
+                  id="preview-input-group"
+                  class="preview-controls-group hidden"
+                >
                   <span class="preview-controls-heading">Fields</span>
-                  <div id="build-preview-input-controls" class="preview-controls-grid"></div>
+                  <div
+                    id="build-preview-input-controls"
+                    class="preview-controls-grid"
+                  ></div>
                 </div>
-                <div id="preview-boolean-group" class="preview-controls-group hidden">
+                <div
+                  id="preview-boolean-group"
+                  class="preview-controls-group hidden"
+                >
                   <span class="preview-controls-heading">Toggles</span>
-                  <div id="build-preview-boolean-controls" class="preview-controls-grid preview-controls-grid--booleans"></div>
+                  <div
+                    id="build-preview-boolean-controls"
+                    class="preview-controls-grid preview-controls-grid--booleans"
+                  ></div>
                 </div>
               </div>
               <div id="build-preview-visual" class="build-preview-visual">
@@ -3202,17 +3404,34 @@
                   Preview will appear after a successful build.
                 </p>
               </div>
-              <details id="preview-actions-details" class="preview-actions-collapsible build-preview-action-log">
+              <details
+                id="preview-actions-details"
+                class="preview-actions-collapsible build-preview-action-log"
+              >
                 <summary>
                   <span>Actions</span>
-                  <span id="preview-actions-count" class="preview-actions-count"></span>
+                  <span
+                    id="preview-actions-count"
+                    class="preview-actions-count"
+                  ></span>
                 </summary>
                 <div class="preview-actions-body">
                   <div class="preview-actions-toolbar">
-                    <button id="clear-preview-actions" class="link btn-inline" type="button">Clear</button>
+                    <button
+                      id="clear-preview-actions"
+                      class="link btn-inline"
+                      type="button"
+                    >
+                      Clear
+                    </button>
                   </div>
-                  <ul id="build-preview-action-log" class="build-preview-action-log-list">
-                    <li class="build-preview-action-empty">Interact with the component to log events.</li>
+                  <ul
+                    id="build-preview-action-log"
+                    class="build-preview-action-log-list"
+                  >
+                    <li class="build-preview-action-empty">
+                      Interact with the component to log events.
+                    </li>
                   </ul>
                 </div>
               </details>
@@ -3221,7 +3440,10 @@
             <div id="build-preview-code-pane" class="build-preview-pane hidden">
               <div id="build-preview-code-workbench" class="code-workbench">
                 <aside class="code-sidebar">
-                  <ul id="build-preview-file-tree" class="build-preview-file-tree"></ul>
+                  <ul
+                    id="build-preview-file-tree"
+                    class="build-preview-file-tree"
+                  ></ul>
                 </aside>
                 <div class="code-editor-panel">
                   <div class="code-editor-header">
@@ -3233,18 +3455,46 @@
                       aria-expanded="true"
                       title="Hide files"
                     ></button>
-                    <span id="build-preview-code-path" class="build-preview-code-path">Select a file</span>
-                    <span id="build-preview-code-status" class="code-status"></span>
-                    <span id="build-preview-save-status" class="save-status"></span>
-                    <button id="copy-preview-file" class="icon-btn" type="button" aria-label="Copy file" title="Copy file"></button>
+                    <span
+                      id="build-preview-code-path"
+                      class="build-preview-code-path"
+                      >Select a file</span
+                    >
+                    <span
+                      id="build-preview-code-status"
+                      class="code-status"
+                    ></span>
+                    <span
+                      id="build-preview-save-status"
+                      class="save-status"
+                    ></span>
+                    <button
+                      id="copy-preview-file"
+                      class="icon-btn"
+                      type="button"
+                      aria-label="Copy file"
+                      title="Copy file"
+                    ></button>
                   </div>
                   <div class="code-editor-body">
                     <div class="code-scroll-host">
                       <div class="code-scroll-inner">
-                        <div id="build-preview-code-gutter" class="code-gutter"></div>
+                        <div
+                          id="build-preview-code-gutter"
+                          class="code-gutter"
+                        ></div>
                         <div class="code-layer">
-                          <pre class="code-scroll"><code id="build-preview-code-content"></code></pre>
-                          <textarea id="build-preview-code-editor" class="code-editor-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+                          <pre
+                            class="code-scroll"
+                          ><code id="build-preview-code-content"></code></pre>
+                          <textarea
+                            id="build-preview-code-editor"
+                            class="code-editor-textarea"
+                            spellcheck="false"
+                            autocomplete="off"
+                            autocorrect="off"
+                            autocapitalize="off"
+                          ></textarea>
                         </div>
                       </div>
                     </div>
@@ -3304,8 +3554,16 @@
               </div>
             </div>
             <div id="correction-stream-shell" class="correction-stream-shell">
-              <div id="correction-stream" class="correction-stream" aria-live="polite"></div>
-              <div id="correction-stream-fade" class="correction-stream-fade" aria-hidden="true"></div>
+              <div
+                id="correction-stream"
+                class="correction-stream"
+                aria-live="polite"
+              ></div>
+              <div
+                id="correction-stream-fade"
+                class="correction-stream-fade"
+                aria-hidden="true"
+              ></div>
             </div>
           </div>
         </div>
@@ -3326,9 +3584,17 @@
         <p class="muted">
           Review changes, choose a target branch, then open the PR.
         </p>
-        <div id="pr-modal-success" class="pr-modal-success hidden" role="status">
+        <div
+          id="pr-modal-success"
+          class="pr-modal-success hidden"
+          role="status"
+        >
           <p>Pull request opened successfully.</p>
-          <button id="pr-modal-success-link" type="button" class="pr-modal-success-link"></button>
+          <button
+            id="pr-modal-success-link"
+            type="button"
+            class="pr-modal-success-link"
+          ></button>
         </div>
         <div id="pr-modal-form">
           <label for="pr-target-branch">Target branch</label>
@@ -3372,14 +3638,23 @@
       </div>
     </div>
 
-
     <div id="preview-modal" class="preview-modal hidden" aria-hidden="true">
       <div id="preview-modal-backdrop" class="preview-modal-backdrop"></div>
-      <div class="preview-modal-panel" role="dialog" aria-modal="true" aria-labelledby="preview-modal-title">
+      <div
+        class="preview-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="preview-modal-title"
+      >
         <div class="preview-modal-header">
           <h2 id="preview-modal-title" class="build-preview-title">Preview</h2>
           <div class="build-preview-header-actions">
-            <div id="preview-modal-mode-toggle" class="build-preview-mode-toggle" role="tablist" aria-label="Preview mode">
+            <div
+              id="preview-modal-mode-toggle"
+              class="build-preview-mode-toggle"
+              role="tablist"
+              aria-label="Preview mode"
+            >
               <button
                 id="preview-modal-mode-preview"
                 class="icon-btn active"
@@ -3399,7 +3674,13 @@
                 title="Code"
               ></button>
             </div>
-            <button id="close-preview-modal" class="icon-btn" type="button" aria-label="Close" title="Close"></button>
+            <button
+              id="close-preview-modal"
+              class="icon-btn"
+              type="button"
+              aria-label="Close"
+              title="Close"
+            ></button>
           </div>
         </div>
         <div id="preview-modal-meta" class="preview-modal-meta"></div>
@@ -3417,17 +3698,31 @@
           <div class="build-preview-action-log">
             <div class="build-preview-action-log-header">
               <span>Actions</span>
-              <button id="clear-preview-modal-actions" class="link btn-inline" type="button">Clear</button>
+              <button
+                id="clear-preview-modal-actions"
+                class="link btn-inline"
+                type="button"
+              >
+                Clear
+              </button>
             </div>
-            <ul id="preview-modal-action-log" class="build-preview-action-log-list">
-              <li class="build-preview-action-empty">Interact with the component to log events.</li>
+            <ul
+              id="preview-modal-action-log"
+              class="build-preview-action-log-list"
+            >
+              <li class="build-preview-action-empty">
+                Interact with the component to log events.
+              </li>
             </ul>
           </div>
         </div>
         <div id="preview-modal-code-pane" class="preview-modal-pane hidden">
           <div id="preview-modal-code-workbench" class="code-workbench">
             <aside class="code-sidebar">
-              <ul id="preview-modal-file-tree" class="build-preview-file-tree"></ul>
+              <ul
+                id="preview-modal-file-tree"
+                class="build-preview-file-tree"
+              ></ul>
             </aside>
             <div class="code-editor-panel">
               <div class="code-editor-header">
@@ -3439,18 +3734,40 @@
                   aria-expanded="true"
                   title="Hide files"
                 ></button>
-                <span id="preview-modal-code-path" class="build-preview-code-path">Select a file</span>
+                <span
+                  id="preview-modal-code-path"
+                  class="build-preview-code-path"
+                  >Select a file</span
+                >
                 <span id="preview-modal-code-status" class="code-status"></span>
                 <span id="preview-modal-save-status" class="save-status"></span>
-                <button id="copy-preview-modal-file" class="icon-btn" type="button" aria-label="Copy file" title="Copy file"></button>
+                <button
+                  id="copy-preview-modal-file"
+                  class="icon-btn"
+                  type="button"
+                  aria-label="Copy file"
+                  title="Copy file"
+                ></button>
               </div>
               <div class="code-editor-body">
                 <div class="code-scroll-host">
                   <div class="code-scroll-inner">
-                    <div id="preview-modal-code-gutter" class="code-gutter"></div>
+                    <div
+                      id="preview-modal-code-gutter"
+                      class="code-gutter"
+                    ></div>
                     <div class="code-layer">
-                      <pre class="code-scroll"><code id="preview-modal-code-content"></code></pre>
-                      <textarea id="preview-modal-code-editor" class="code-editor-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+                      <pre
+                        class="code-scroll"
+                      ><code id="preview-modal-code-content"></code></pre>
+                      <textarea
+                        id="preview-modal-code-editor"
+                        class="code-editor-textarea"
+                        spellcheck="false"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="off"
+                      ></textarea>
                     </div>
                   </div>
                 </div>

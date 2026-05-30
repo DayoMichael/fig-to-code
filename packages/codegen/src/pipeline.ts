@@ -38,6 +38,7 @@ import {
   sanitizeUpdateBarrelPatches,
   buildPackageIndexAppendPatch,
 } from "./scaffold.js";
+import { formatChangedPatches, type FormatPatchContext } from "./format-patches.js";
 import type { CodegenChangeSummary } from "@fig2code/spec";
 
 const execFileAsync = promisify(execFile);
@@ -60,6 +61,7 @@ export interface CodegenContext {
   llmProvider?: LLMProvider;
   intent?: JobIntent;
   existingFiles?: ExistingFilesContext;
+  formatContext?: FormatPatchContext;
 }
 
 export interface CodegenRunResult {
@@ -210,7 +212,16 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
 
   output = {
     ...bestOutput,
-    patches: normalizeCodegenPatches(bestOutput.patches, context),
+    patches: await formatChangedPatches(normalizeCodegenPatches(bestOutput.patches, context), {
+      formatter: context.syncConfig.conventions.formatter ?? "auto",
+      ...context.formatContext,
+      existingFiles:
+        context.formatContext?.existingFiles ??
+        context.existingFiles?.files.map((file) => ({
+          path: file.path,
+          content: file.content,
+        })),
+    }),
   };
 
   const changeSummary = isUpdate ? normalizeChangeSummary(output) : null;

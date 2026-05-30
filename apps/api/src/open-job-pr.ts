@@ -3,6 +3,7 @@ import {
   isAppendExportPatch,
   mergeAppendExportIntoContent,
   packageIndexExportExists,
+  formatChangedPatches,
 } from "@fig2code/codegen";
 import { createGitHostProvider, type GitHostProvider } from "@fig2code/git-host";
 import type { StoredJob } from "./job-store.js";
@@ -12,6 +13,8 @@ export interface OpenJobPullRequestInput {
   targetBranch: string;
   patches?: FilePatch[];
   previewFileOverrides?: Array<{ path: string; role: string; content: string }>;
+  /** Cached repo clone — enables Prettier CLI formatting with team plugins. */
+  repoClonePath?: string;
 }
 
 export interface OpenJobPullRequestResult {
@@ -176,6 +179,8 @@ export interface OpenPullRequestFromPatchesInput {
   patches: FilePatch[];
   branchSuffix: string;
   body?: string;
+  formatter?: StoredJob["request"]["syncConfig"]["conventions"]["formatter"];
+  repoClonePath?: string;
 }
 
 export async function openPullRequestFromPatches(
@@ -198,7 +203,19 @@ export async function openPullRequestFromPatches(
     git,
   });
 
-  if (resolvedPatches.length === 0) {
+  const formattedPatches = await formatChangedPatches(resolvedPatches, {
+    formatter: input.formatter ?? "auto",
+    repoRoot: input.repoClonePath,
+    readFile: async (path: string) => {
+      try {
+        return await git.readFile(vcs, auth, path, targetBranch);
+      } catch {
+        return null;
+      }
+    },
+  });
+
+  if (formattedPatches.length === 0) {
     throw new Error("No file changes to include in the pull request");
   }
 
@@ -206,7 +223,7 @@ export async function openPullRequestFromPatches(
     headBranch,
     baseBranch: targetBranch,
     message: `Fig2Code: ${componentName}`,
-    patches: resolvedPatches,
+    patches: formattedPatches,
   });
 
   const pr = await git.openPullRequest({
@@ -257,5 +274,7 @@ export async function openJobPullRequest(
     patches,
     branchSuffix: stored.id,
     body: buildPullRequestBody(stored),
+    formatter: stored.request.syncConfig.conventions.formatter,
+    repoClonePath: input.repoClonePath,
   });
 }

@@ -38,6 +38,20 @@ const TAILWIND_CONFIG_NAMES = [
   "tailwind.config.cjs",
 ];
 
+const PRETTIER_CONFIG_NAMES = [
+  ".prettierrc",
+  ".prettierrc.json",
+  ".prettierrc.yml",
+  ".prettierrc.yaml",
+  ".prettierrc.js",
+  ".prettierrc.cjs",
+  ".prettierrc.mjs",
+  "prettier.config.js",
+  "prettier.config.cjs",
+  "prettier.config.mjs",
+  "prettier.config.ts",
+];
+
 const STATIC_COMPONENT_CANDIDATES = [
   "src/components",
   "components",
@@ -106,6 +120,7 @@ export async function detectProjectConfig(options: ScanOptions): Promise<Detecte
   const styleSystem = await detectStyleSystemFromIndex(index, workspaceDeps, tailwindConfigPath);
   const testFramework = detectTestFrameworkFromIndex(index, workspaceDeps);
   const storyFormat = detectStoryFormatFromIndex(index);
+  const formatter = detectFormatterFromIndex(index, workspaceDeps);
   const componentPaths = findComponentPathsFromIndex(index);
   const tokenPaths = findTokenPathsFromIndex(index);
   const iconPaths = findIconPathsFromIndex(index);
@@ -134,6 +149,7 @@ export async function detectProjectConfig(options: ScanOptions): Promise<Detecte
     fileNaming,
     testFramework,
     storyFormat,
+    formatter,
     hasCodeConnect: existingComponents.some((c) => c.hasCodeConnect),
     platforms,
     existingComponents,
@@ -166,6 +182,7 @@ export function detectedConfigToSyncConfig(
       fileNaming: detected.fileNaming,
       testFramework: detected.testFramework,
       storyFormat: detected.storyFormat,
+      formatter: detected.formatter === "prettier" ? "prettier" : "auto",
     },
     llm: {
       modelId: "anthropic/claude-sonnet",
@@ -272,6 +289,19 @@ function detectStoryFormatFromIndex(index: RepoIndex): DetectedProjectConfig["st
     indexHasFileSuffix(index, ".stories.jsx");
   if (!hasStories) return "none";
   return "csf3";
+}
+
+export function detectFormatterFromIndex(
+  index: RepoIndex,
+  deps: Record<string, string>,
+): DetectedProjectConfig["formatter"] {
+  if (indexFindFilesNamed(index, PRETTIER_CONFIG_NAMES).length > 0) {
+    return "prettier";
+  }
+  if (deps.prettier) {
+    return "prettier";
+  }
+  return "none";
 }
 
 function findComponentPathsFromIndex(index: RepoIndex): string[] {

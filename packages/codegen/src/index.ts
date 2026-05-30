@@ -19,6 +19,12 @@ export {
 } from "./scaffold.js";
 export type { CodegenFilePlan } from "./scaffold.js";
 export {
+  formatChangedPatches,
+  formatJobBuildPreview,
+  isFormattablePatchPath,
+} from "./format-patches.js";
+export type { FormatPatchContext } from "./format-patches.js";
+export {
   buildJobPreview,
   previewFullText,
   previewSnippet,

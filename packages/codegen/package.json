@@ -22,7 +22,8 @@
     "@fig2code/llm": "workspace:*",
     "@fig2code/prompts": "workspace:*",
     "@fig2code/repo": "workspace:*",
-    "@fig2code/spec": "workspace:*"
+    "@fig2code/spec": "workspace:*",
+    "prettier": "^3.5.3"
   },
   "devDependencies": {
     "tsx": "^4.19.4"

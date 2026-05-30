@@ -218,6 +218,12 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
     }
 
     try {
+      const repoClonePath = await repoCache.getOrClone(
+        stored.request.vcs,
+        gitToken,
+        c.req.header("x-atlassian-email")?.trim() || stored.secrets.atlassianEmail,
+      );
+
       const result = await openJobPullRequest({
         stored: {
           ...stored,
@@ -231,6 +237,7 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
         targetBranch,
         patches: body.patches,
         previewFileOverrides: body.previewFileOverrides,
+        repoClonePath,
       });
 
       const updated = store.update(c.req.param("id"), {
@@ -283,6 +290,7 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
           vcs: stored.request.vcs,
           gitToken: stored.secrets.gitToken,
           atlassianEmail: stored.secrets.atlassianEmail,
+          formatter: stored.request.syncConfig.conventions.formatter,
         });
       } catch (err) {
         console.error("[fig2code] preview session start failed", err);

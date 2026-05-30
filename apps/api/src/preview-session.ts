@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile as readFs, writeFile, rm, access } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import path from "node:path";
-import type { JobBuildPreview, TokenCatalog, VcsConfig } from "@fig2code/spec";
+import type { JobBuildPreview, TokenCatalog, VcsConfig, FormatterPreference } from "@fig2code/spec";
 import {
   extractComponentName,
   isDefaultExport,
@@ -16,6 +16,7 @@ import {
   usesStorybookPreview,
   isAppendExportPatch,
   mergeAppendExportIntoContent,
+  formatJobBuildPreview,
 } from "@fig2code/codegen";
 import { storyFormatLabel } from "@fig2code/codegen";
 import type { RepoCloneCache } from "./repo-cache.js";
@@ -56,6 +57,7 @@ export interface PreviewSessionConfig {
   vcs: VcsConfig;
   gitToken: string;
   atlassianEmail?: string;
+  formatter?: FormatterPreference;
 }
 
 export interface StartExistingOptions {
@@ -1104,6 +1106,15 @@ export function createPreviewSessionManager(
       config.gitToken,
       config.atlassianEmail,
     );
+
+    buildPreview = await formatJobBuildPreview(buildPreview, {
+      formatter: config.formatter ?? "auto",
+      repoRoot: repoClonePath,
+      existingFiles: buildPreview.files?.map((file) => ({
+        path: file.path,
+        content: file.content,
+      })),
+    });
 
     // 2. Set up the preview harness directory inside the clone
     const harnessPath = path.join(repoClonePath, PREVIEW_DIR);

@@ -3,6 +3,7 @@ import type {
   FileNaming,
   Platform,
   PropsPattern,
+  FormatterPreference,
   StoryFormat,
   StyleSystem,
   TestFramework,
@@ -51,6 +52,8 @@ export interface ConventionsConfig {
   fileNaming: FileNaming;
   testFramework: TestFramework;
   storyFormat: StoryFormat;
+  /** Defaults to "auto" when omitted (detect Prettier from repo). */
+  formatter?: FormatterPreference;
 }
 
 export type CompactionMode = "off" | "auto";
