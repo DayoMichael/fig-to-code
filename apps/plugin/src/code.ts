@@ -95,6 +95,16 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
         await pollJob(msg.apiBase, msg.jobId);
         break;
 
+      case "create-pull-request":
+        await createPullRequest(msg);
+        break;
+
+      case "open-external-url":
+        if (typeof msg.url === "string" && /^https?:\/\//.test(msg.url)) {
+          figma.openExternal(msg.url);
+        }
+        break;
+
       case "ensure-existing-preview":
         await ensureExistingPreview(msg);
         break;
@@ -170,15 +180,42 @@ async function bootstrap(): Promise<void> {
 
 async function loadBranches(msg: LoadBranchesMessage): Promise<void> {
   const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
-  const vcs = buildVcsFromMessage(msg);
+
+  let vcs: VcsConfig;
+  let token: string;
+  let atlassianEmail: string | undefined;
+
+  if (msg.token?.trim() && msg.slugA?.trim() && msg.slugB?.trim()) {
+    vcs = buildVcsFromMessage(msg);
+    token = msg.token.trim();
+    atlassianEmail = msg.atlassianEmail?.trim() || undefined;
+  } else {
+    const [connection, storedToken, storedEmail] = await Promise.all([
+      figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+        PluginConnection | undefined
+      >,
+      figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+      figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<
+        string | undefined
+      >,
+    ]);
+
+    if (!connection?.vcs || !storedToken?.trim()) {
+      throw new Error("Connect a repository before loading branches.");
+    }
+
+    vcs = connection.vcs;
+    token = storedToken.trim();
+    atlassianEmail = storedEmail?.trim() || undefined;
+  }
 
   const res = await fetch(`${apiBase}/repos/refs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       vcs,
-      token: msg.token,
-      atlassianEmail: msg.atlassianEmail,
+      token,
+      atlassianEmail,
     }),
   });
 
@@ -572,7 +609,7 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
       : null;
 
   const previewFileOverrides = msg.previewFileOverrides?.filter(
-    (file) => file.path.trim() && file.content.trim(),
+    (file) => file.path?.trim() && file.content?.trim(),
   );
   const hasPreviewOverrides = Boolean(previewFileOverrides?.length);
 
@@ -657,6 +694,68 @@ async function pollJob(apiBase: string, jobId: string): Promise<void> {
   const res = await fetch(`${apiBase}/jobs/${jobId}`);
   const job = (await res.json()) as JobRecord;
   figma.ui.postMessage({ type: "job-update", job });
+}
+
+async function createPullRequest(msg: CreatePullRequestMessage): Promise<void> {
+  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const [token, atlassianEmail, connection] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+      PluginConnection | undefined
+    >,
+  ]);
+
+  if (!token?.trim()) {
+    throw new Error("Git token is required");
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-git-token": token.trim(),
+  };
+  if (atlassianEmail?.trim()) {
+    headers["x-atlassian-email"] = atlassianEmail.trim();
+  }
+
+  if (msg.jobId) {
+    const body: {
+      targetBranch?: string;
+      patches?: CreatePullRequestMessage["patches"];
+      previewFileOverrides?: CreatePullRequestMessage["previewFileOverrides"];
+    } = {};
+
+    if (msg.targetBranch?.trim()) {
+      body.targetBranch = msg.targetBranch.trim();
+    }
+    if (msg.patches?.length) {
+      body.patches = msg.patches;
+    }
+    if (msg.previewFileOverrides?.length) {
+      body.previewFileOverrides = msg.previewFileOverrides;
+    }
+
+    const res = await fetch(`${apiBase}/jobs/${msg.jobId}/pull-request`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(err.error ?? `Failed to open pull request (${res.status})`);
+    }
+
+    const job = (await res.json()) as JobRecord;
+    figma.ui.postMessage({ type: "job-update", job });
+    return;
+  }
+
+  if (!connection?.vcs) {
+    throw new Error("Connect a repository before opening a pull request");
+  }
+
+  throw new Error("Validated job id is required to open a pull request");
 }
 
 function buildVcsFromMessage(msg: VcsFormMessage): VcsConfig {
@@ -1551,6 +1650,20 @@ interface PushSelectionMessage {
   }>;
 }
 
+interface CreatePullRequestMessage {
+  type: "create-pull-request";
+  apiBase: string;
+  jobId?: string;
+  componentName: string;
+  targetBranch?: string;
+  patches: Array<{ path: string; action: "create" | "update"; content: string }>;
+  previewFileOverrides?: Array<{
+    path: string;
+    role: string;
+    content: string;
+  }>;
+}
+
 type PluginMessage =
   | { type: "ui-ready" }
   | { type: "resize-ui"; width: number; height: number }
@@ -1562,6 +1675,8 @@ type PluginMessage =
   | { type: "save-setup"; overrides: SetupOverrides }
   | SaveLlmMessage
   | PushSelectionMessage
+  | CreatePullRequestMessage
+  | { type: "open-external-url"; url: string }
   | { type: "check-job"; jobId: string; apiBase: string }
   | {
       type: "ensure-existing-preview";

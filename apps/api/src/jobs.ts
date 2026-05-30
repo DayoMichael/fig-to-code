@@ -1,5 +1,7 @@
 import { Hono } from "hono";
-import type { EnqueueJobRequest, JobRecord } from "@fig2code/spec";
+import type { EnqueueJobRequest, FilePatch, JobRecord } from "@fig2code/spec";
+import { GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
+import { openJobPullRequest } from "./open-job-pr.js";
 import {
   createJobStore,
   type JobStore,
@@ -28,6 +30,21 @@ const PASS_THROUGH_HEADERS = [
   "access-control-allow-origin",
 ];
 
+/** Preserve query strings (e.g. Vite `?import` asset transforms) when forwarding to the dev server. */
+export function buildViteProxyTargetUrl(
+  previewUrl: string,
+  requestUrl: string,
+): string {
+  const incoming = new URL(requestUrl);
+  const viteBase = new URL(previewUrl);
+  return `${viteBase.origin}${incoming.pathname}${incoming.search}`;
+}
+
+function incomingPathFrom(requestUrl: string): string {
+  const incoming = new URL(requestUrl);
+  return `${incoming.pathname}${incoming.search}`;
+}
+
 async function proxyToVite(
   c: Context,
   session: PreviewSession,
@@ -36,12 +53,17 @@ async function proxyToVite(
     getSession?: (sessionId: string) => PreviewSession | undefined;
   },
 ): Promise<Response> {
-  const reqPath = c.req.path;
-  const targetUrl = `${session.previewUrl}${reqPath}`;
+  const targetUrl = buildViteProxyTargetUrl(session.previewUrl, c.req.url);
   try {
+    const forwardHeaders = new Headers();
+    const accept = c.req.header("accept");
+    if (accept) {
+      forwardHeaders.set("Accept", accept);
+    }
+
     const viteRes = await fetch(targetUrl, {
       method: c.req.method,
-      headers: { Accept: c.req.header("accept") ?? "*/*" },
+      headers: forwardHeaders,
     });
 
     const headers = new Headers();
@@ -54,7 +76,7 @@ async function proxyToVite(
     if (viteRes.status >= 400) {
       const errorBody = await viteRes.text();
       console.error(
-        `[fig2code] vite ${viteRes.status} for ${reqPath}:`,
+        `[fig2code] vite ${viteRes.status} for ${incomingPathFrom(c.req.url)}:`,
         errorBody.slice(0, 2000),
       );
       return new Response(errorBody, { status: viteRes.status, headers });
@@ -159,6 +181,88 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       return c.json({ error: "Job not found" }, 404);
     }
     return c.json(job);
+  });
+
+  app.post("/jobs/:id/pull-request", async (c) => {
+    const gitToken = c.req.header("x-git-token")?.trim();
+    if (!gitToken) {
+      return c.json({ error: "x-git-token header is required" }, 400);
+    }
+
+    const stored = store.getStored(c.req.param("id"));
+    if (!stored) {
+      return c.json({ error: "Job not found" }, 404);
+    }
+
+    if (stored.status !== "validated" && stored.status !== "pr_opened") {
+      return c.json({ error: "Job must be validated before opening a pull request" }, 409);
+    }
+
+    if (stored.prUrl) {
+      return c.json(store.get(c.req.param("id"))!);
+    }
+
+    const body = (await c.req.json()) as {
+      targetBranch?: string;
+      patches?: FilePatch[];
+      previewFileOverrides?: Array<{ path: string; role: string; content: string }>;
+    };
+
+    const targetBranch =
+      body.targetBranch?.trim() ||
+      stored.request.vcs.defaultPrTarget ||
+      stored.request.vcs.baseBranch;
+
+    if (!targetBranch) {
+      return c.json({ error: "targetBranch is required" }, 400);
+    }
+
+    try {
+      const result = await openJobPullRequest({
+        stored: {
+          ...stored,
+          secrets: {
+            ...stored.secrets,
+            gitToken,
+            atlassianEmail:
+              c.req.header("x-atlassian-email")?.trim() || stored.secrets.atlassianEmail,
+          },
+        },
+        targetBranch,
+        patches: body.patches,
+        previewFileOverrides: body.previewFileOverrides,
+      });
+
+      const updated = store.update(c.req.param("id"), {
+        status: "pr_opened",
+        prUrl: result.prUrl,
+      });
+
+      console.log("[fig2code] pull request opened", {
+        jobId: stored.id,
+        targetBranch,
+        headBranch: result.headBranch,
+        prUrl: result.prUrl,
+      });
+
+      return c.json(updated);
+    } catch (err) {
+      console.error("[fig2code] pull request failed", err);
+      if (err instanceof GitHostApiError) {
+        const provider = stored.request.vcs.provider;
+        const status = err.status === 401 || err.status === 403 ? err.status : 502;
+        return c.json(
+          {
+            error: formatGitHostApiError(err, provider),
+          },
+          status,
+        );
+      }
+      return c.json(
+        { error: err instanceof Error ? err.message : "Failed to open pull request" },
+        500,
+      );
+    }
   });
 
   app.get("/jobs/:id/preview", async (c) => {
@@ -304,6 +408,26 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       });
     }
     return proxyToVite(c, session, previewProxyHooks);
+  });
+
+  app.put("/preview/existing/:sessionId/files", async (c) => {
+    const sessionId = c.req.param("sessionId");
+    const session = previewSessions.getSession(sessionId);
+    if (!session) {
+      return c.json({ error: "Preview session not found" }, 404);
+    }
+
+    const body = (await c.req.json()) as { path: string; content: string };
+    if (!body?.path || typeof body.content !== "string") {
+      return c.json({ error: "path and content are required" }, 400);
+    }
+
+    try {
+      await previewSessions.writeFile(sessionId, body.path, body.content);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
   });
 
   app.all("/preview/existing/:sessionId/*", async (c) => {

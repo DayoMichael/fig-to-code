@@ -58,7 +58,10 @@ describe("golden codegen flow", () => {
       llmProvider: mock,
     });
 
-    assert.equal(result.patches.length, 2);
+    assert.ok(result.patches.length >= 2);
+    assert.ok(result.patches.some((patch) => patch.path.endsWith("Button.tsx")));
+    assert.ok(result.patches.some((patch) => patch.path.endsWith("Button.stories.tsx")));
+    assert.ok(result.patches.some((patch) => patch.path.endsWith("Button.test.tsx")));
     assert.match(result.summary ?? "", /Generated Button/);
     assert.equal(mock.calls.length, 1);
     assert.equal(mock.calls[0]?.envelope.modelId, "anthropic/claude-sonnet");

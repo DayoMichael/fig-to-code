@@ -24,6 +24,55 @@ import {
 } from "./preview-utils.js";
 
 describe("preview utils", () => {
+  it("prefers the root export from a compound export block over sub-part forwardRef", () => {
+    const source = `
+export {
+  Select,
+  SelectGroup,
+  SelectValue,
+  SelectTrigger,
+  SelectContent,
+  SelectItem,
+} from "./select";
+
+const SelectTrigger = React.forwardRef((props, ref) => <button ref={ref} {...props} />);
+const Select = SelectPrimitive.Root;
+`;
+    assert.equal(extractComponentName(source, "Select"), "Select");
+  });
+
+  it("prefers Form over FormItem forwardRef in compound files", () => {
+    const source = `
+export {
+  Form,
+  FormItem,
+  FormLabel,
+  FormControl,
+  FormField,
+};
+
+const FormItem = React.forwardRef((props, ref) => <div ref={ref} {...props} />);
+const Form = FormProvider;
+`;
+    assert.equal(extractComponentName(source, "Form"), "Form");
+  });
+
+  it("prefers Toast over ToastViewport forwardRef", () => {
+    const source = `
+export {
+  ToastProps,
+  ToastActionElement,
+  ToastProvider,
+  ToastViewport,
+  Toast,
+};
+
+const ToastViewport = React.forwardRef((props, ref) => <div ref={ref} {...props} />);
+const Toast = React.forwardRef((props, ref) => <div ref={ref} {...props} />);
+`;
+    assert.equal(extractComponentName(source, "Toast"), "Toast");
+  });
+
   it("prefers forwardRef component bindings when extracting the component name", () => {
     assert.equal(
       extractComponentName(

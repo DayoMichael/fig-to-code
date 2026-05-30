@@ -1,4 +1,4 @@
-import type { FilePatch, VcsConfig } from "@fig2code/spec";
+import type { VcsConfig } from "@fig2code/spec";
 import { asGitHostAuth, type GitHostAuth } from "./auth.js";
 import { GitHostApiError, hostFetch, readJson } from "./fetch.js";
 import { cloneRepository } from "./clone.js";
@@ -80,9 +80,7 @@ export class GitHubProvider implements GitHostProvider {
   async writeFiles(
     _vcs: VcsConfig,
     _auth: GitHostAuth | string,
-    _branch: string,
-    _message: string,
-    _patches: FilePatch[],
+    _input: import("./types.js").WriteFilesInput,
   ): Promise<string> {
     throw new Error("GitHubProvider.writeFiles ships in M3 (PR workflow)");
   }

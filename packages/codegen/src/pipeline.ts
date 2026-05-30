@@ -29,6 +29,13 @@ import {
   formatChangeSummaryText,
   normalizeChangeSummary,
 } from "./change-summary.js";
+import {
+  appendExportPatchToFile,
+  ensureCodegenScaffolds,
+  isAppendExportPatch,
+  planCodegenFiles,
+  buildPackageIndexAppendPatch,
+} from "./scaffold.js";
 import type { CodegenChangeSummary } from "@fig2code/spec";
 
 const execFileAsync = promisify(execFile);
@@ -63,6 +70,8 @@ export interface CodegenRunResult {
 export async function runCodegen(context: CodegenContext): Promise<CodegenRunResult> {
   const modelId = context.syncConfig.llm?.modelId ?? "anthropic/claude-sonnet";
   const isUpdate = context.intent === "component-update" && Boolean(context.existingFiles);
+
+  const filePlan = planCodegenFiles(context.syncConfig, context.prunedSpec.name);
 
   const resolvedSpec = resolvePrunedSpecTokens(context.prunedSpec, context.tokenResolver, {
     styleSystem: context.syncConfig.web?.styleSystem,
@@ -104,6 +113,13 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
           intent: "component",
           targets: context.syncConfig.platforms,
           conventions: context.syncConfig.conventions,
+          componentName: context.prunedSpec.name,
+          expectedFiles: {
+            ...filePlan,
+            packageIndexPatchExample: filePlan.packageIndexPath
+              ? buildPackageIndexAppendPatch(filePlan)
+              : undefined,
+          },
           ...(context.syncConfig.llm?.notes
             ? { teamNotes: context.syncConfig.llm.notes }
             : {}),
@@ -196,7 +212,7 @@ function normalizeCodegenPatches(
   const tokenCss = context.syncConfig.tokens?.sourceExcerpt;
   const catalog = context.syncConfig.tokens?.catalog;
 
-  return patches.map((patch) => {
+  const normalized = patches.map((patch) => {
     if (!patch.content) {
       return patch;
     }
@@ -205,6 +221,13 @@ function normalizeCodegenPatches(
       content: normalizeGeneratedStyleClasses(patch.content, tokenCss, catalog),
     };
   });
+
+  return ensureCodegenScaffolds(
+    normalized,
+    context.syncConfig,
+    context.prunedSpec,
+    context.existingFiles,
+  );
 }
 
 function appendUnresolvedIssuesSummary(
@@ -223,6 +246,11 @@ export async function applyPatches(workspaceRoot: string, patches: FilePatch[]):
 
     if (patch.action === "delete") {
       await rm(abs, { force: true });
+      continue;
+    }
+
+    if (patch.content && isAppendExportPatch(patch.content)) {
+      await appendExportPatchToFile(abs, patch.content);
       continue;
     }
 

@@ -25,10 +25,19 @@ export interface CloneOptions {
 export interface PullRequestInput {
   vcs: VcsConfig;
   token: string;
-  branch: string;
+  atlassianEmail?: string;
+  headBranch: string;
+  baseBranch: string;
   title: string;
   body: string;
   labels?: string[];
+}
+
+export interface WriteFilesInput {
+  headBranch: string;
+  baseBranch: string;
+  message: string;
+  patches: FilePatch[];
 }
 
 export interface PullRequestResult {
@@ -45,9 +54,7 @@ export interface GitHostProvider {
   writeFiles(
     vcs: VcsConfig,
     auth: GitHostAuth | string,
-    branch: string,
-    message: string,
-    patches: FilePatch[],
+    input: WriteFilesInput,
   ): Promise<string>;
   openPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
 }

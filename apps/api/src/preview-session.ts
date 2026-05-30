@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile as readFs, writeFile, rm, access } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import path from "node:path";
@@ -6,17 +7,25 @@ import type { JobBuildPreview, TokenCatalog, VcsConfig } from "@fig2code/spec";
 import {
   extractComponentName,
   isDefaultExport,
-  defaultPreviewArgs,
   extractExistingPreviewMetadata,
-  extractHandlerPropNames,
   extractInjectedTokenCss,
   buildTokenColorUtilityCss,
   buildTailwindConfigFromTokenCss,
   extractTailwindColorClasses,
+  generatePreviewMainTsx,
+  usesStorybookPreview,
 } from "@fig2code/codegen";
 import { storyFormatLabel } from "@fig2code/codegen";
 import type { RepoCloneCache } from "./repo-cache.js";
 import { resolveHarnessTsConfig } from "./resolve-tsconfig.js";
+import { buildStoryFileCandidates } from "@fig2code/repo";
+import {
+  extendHarnessIncludeForStory,
+  mergeHarnessAliases,
+  isStorybookToolingPackage,
+  resolveStorybookHarnessSupport,
+  sanitizeStorybookHarnessDependencies,
+} from "./storybook-harness.js";
 import { resolvePreviewTheme, type PreviewThemeBundle } from "./preview-theme.js";
 
 export interface PreviewSession {
@@ -122,16 +131,25 @@ function sanitizeJsxStyleProps(source: string): string {
 // Harness file generators
 // ---------------------------------------------------------------------------
 
-function generateHarnessPackageJson(): string {
+// Bump when harness install/layout changes so stale preview dirs are rebuilt.
+const HARNESS_SCHEMA_VERSION = 3;
+
+function generateHarnessPackageJson(
+  extraDependencies: Record<string, string> = {},
+): string {
+  const dependencies = sanitizeStorybookHarnessDependencies({
+    vite: "^6.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    ...extraDependencies,
+  });
+
   return JSON.stringify(
     {
       name: "fig2code-preview-harness",
       private: true,
       type: "module",
-      dependencies: {
-        vite: "^6.0.0",
-        "@vitejs/plugin-react": "^4.0.0",
-      },
+      fig2codeHarnessVersion: HARNESS_SCHEMA_VERSION,
+      dependencies,
     },
     null,
     2,
@@ -282,6 +300,7 @@ function generateHarnessViteConfig(
   aliases?: Record<string, string>,
   reactModules?: { react: string; reactDom: string },
   dependencyAliases: DependencyAlias[] = [],
+  extraOptimizeIncludes: string[] = [],
 ): string {
   const baseOption = basePath ? `\n  base: '${basePath}',` : "";
   const aliasBlock = serializeViteAliases(
@@ -299,11 +318,24 @@ function generateHarnessViteConfig(
   const includeList = [
     ...BASE_OPTIMIZE_INCLUDES,
     ...dependencyAliases.map((d) => d.name),
+    ...extraOptimizeIncludes.filter((name) => !isStorybookToolingPackage(name)),
   ];
   const includeLiteral = JSON.stringify(includeList, null, 6).replace(
     /\n/g,
     "\n    ",
   );
+  const excludeLiteral = JSON.stringify(
+    [
+      "@storybook/addon-essentials",
+      "@storybook/addon-interactions",
+      "@storybook/addon-links",
+      "@storybook/blocks",
+      "@storybook/react-vite",
+      "storybook",
+    ],
+    null,
+    6,
+  ).replace(/\n/g, "\n    ");
 
   return `import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
@@ -311,8 +343,24 @@ import path from 'node:path';
 
 const repoRoot = path.resolve(__dirname, '..');
 
+/** Preview harness runs behind a proxy with HMR disabled — drop @vite/client to avoid WS noise. */
+function fig2codePreviewHarnessPlugin() {
+  return {
+    name: 'fig2code-preview-harness',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        return html.replace(
+          /<script type="module"[^>]*src="[^"]*@vite\\/client"[^>]*><\\/script>\\s*/g,
+          '',
+        );
+      },
+    },
+  };
+}
+
 export default defineConfig({${baseOption}
-  plugins: [react({ fastRefresh: false })],
+  plugins: [fig2codePreviewHarnessPlugin(), react({ fastRefresh: false })],
   resolve: {
     alias: {
 ${aliasBlock}${depAliasBlock ? "\n" + depAliasBlock : ""}
@@ -325,6 +373,7 @@ ${aliasBlock}${depAliasBlock ? "\n" + depAliasBlock : ""}
     // Prevents mid-session re-optimization (which, with hmr disabled, leaves a
     // stale second copy of React → "Invalid hook call").
     include: ${includeLiteral},
+    exclude: ${excludeLiteral},
   },
   server: {
     cors: true,
@@ -385,8 +434,15 @@ function generateIndexHtml(
   const tokenColorClasses = tokenCss
     ? extractTailwindColorClasses(componentContent, storyContent)
     : [];
-  const formatLabel = storyFormatLabel(buildPreview.storyFormat);
+  const formatLabel = buildPreview.storyMissing
+    ? "Component fallback (no story)"
+    : usesStorybookPreview(buildPreview)
+      ? "Storybook preview"
+      : storyFormatLabel(buildPreview.storyFormat);
   const variantLabel = buildPreview.variantLabel || "Default";
+  const storyNotice = buildPreview.storyMissing
+    ? `<div class="preview-notice">No Storybook story found — showing component fallback preview.</div>`
+    : "";
 
   const themeCss = theme?.css ?? "";
   const combinedTokenCss = [themeCss, injectedTokenCss, tokenColorUtilityCss]
@@ -467,6 +523,16 @@ function generateIndexHtml(
         line-height: 1.5;
         white-space: pre-wrap;
       }
+      .preview-notice {
+        margin: 0 0 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #fffbeb;
+        border: 1px solid #fcd34d;
+        color: #92400e;
+        font-size: 12px;
+        line-height: 1.4;
+      }
     </style>
   </head>
   <body>
@@ -476,7 +542,7 @@ function generateIndexHtml(
           <div><strong id="fig2code-component-label">${componentName}</strong> / <span id="fig2code-variant-label">${variantLabel}</span></div>
           <div>${formatLabel}</div>
         </div>
-        <div class="preview-canvas"><div id="root"></div></div>
+        <div class="preview-canvas">${storyNotice}<div id="root"></div></div>
       </div>
     </div>
     <script type="module" src="${mainModuleSrc}"></script>
@@ -489,178 +555,78 @@ function generateMainTsx(
   componentName: string,
   useDefaultImport: boolean,
   componentRepoPath: string,
+  storybook?: {
+    storyRepoPath?: string;
+    previewAnnotationsPath?: string;
+  },
 ): string {
-  const variants = buildPreview.variants ?? {};
-  const args = defaultPreviewArgs(buildPreview);
-  const handlerProps = extractHandlerPropNames(
-    buildPreview.componentContent ?? "",
-  );
-  const defaultVariantLabel = buildPreview.variantLabel || "Default";
-
-  // Import the component at its real repo path (relative to .fig2code-preview/)
-  const importPath =
-    "../" + componentRepoPath.replace(/\.(tsx?|jsx?)$/, "");
-
-  const importStatement = useDefaultImport
-    ? `import ${componentName} from '${importPath}';`
-    : `import { ${componentName} } from '${importPath}';`;
-
-  return `import React, { useState, useEffect, type ReactNode } from 'react';
-import { createRoot } from 'react-dom/client';
-${importStatement}
-
-const COMPONENT_NAME = ${JSON.stringify(componentName)};
-const DEFAULT_ARGS: Record<string, unknown> = ${JSON.stringify(args)};
-const VARIANTS: Record<string, string[]> = ${JSON.stringify(variants)};
-const HANDLER_PROPS: string[] = ${JSON.stringify(handlerProps)};
-const DEFAULT_VARIANT_LABEL = ${JSON.stringify(defaultVariantLabel)};
-
-class PreviewErrorBoundary extends React.Component<
-  { children: ReactNode },
-  { error: Error | null }
-> {
-  state = { error: null as Error | null };
-  static getDerivedStateFromError(error: Error) {
-    return { error };
-  }
-  componentDidCatch() {}
-  render() {
-    if (this.state.error) {
-      return (
-        <div className="preview-error">
-          {'Preview failed for ' + COMPONENT_NAME + ': ' + String(this.state.error.message || this.state.error)}
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-function applyVariantSelection(selected: Record<string, string>): Record<string, unknown> {
-  const next = { ...DEFAULT_ARGS };
-  for (const [key, values] of Object.entries(VARIANTS)) {
-    const picked = selected?.[key];
-    next[key] = picked && values.includes(picked) ? picked : (values[0] ?? next[key]);
-  }
-  return next;
-}
-
-function applyPreviewArgs(incoming: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...DEFAULT_ARGS, ...incoming };
-  for (const [key, values] of Object.entries(VARIANTS)) {
-    const picked = incoming[key];
-    if (typeof picked === 'string' && values.includes(picked)) {
-      next[key] = picked;
-    }
-  }
-  return next;
-}
-
-function formatPreviewActionArgs(args: unknown[]): string {
-  return args.map((arg) => {
-    if (arg == null) return String(arg);
-    if (typeof arg === 'string') return JSON.stringify(arg);
-    if (typeof arg === 'number' || typeof arg === 'boolean') return String(arg);
-    if (arg && typeof arg === 'object' && ('nativeEvent' in arg || 'target' in arg)) return 'SyntheticEvent';
-    try { return JSON.stringify(arg); } catch { return Object.prototype.toString.call(arg); }
-  }).join(', ');
-}
-
-function logPreviewAction(name: string, actionArgs: unknown[]) {
-  const entry = {
-    name,
-    detail: formatPreviewActionArgs(actionArgs),
-    at: Date.now(),
-  };
-  if (window.parent && window.parent !== window) {
-    window.parent.postMessage({ type: 'fig2code-preview-action', action: entry }, '*');
-  }
-}
-
-function ensureHandlers(args: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...args };
-  for (const key of HANDLER_PROPS) {
-    if (!(key in next) || next[key] == null) {
-      next[key] = (...a: unknown[]) => logPreviewAction(key, a);
-    } else if (typeof next[key] === 'function') {
-      const original = next[key] as (...a: unknown[]) => unknown;
-      next[key] = (...a: unknown[]) => {
-        logPreviewAction(key, a);
-        return original(...a);
-      };
-    }
-  }
-  return next;
-}
-
-function App() {
-  const [args, setArgs] = useState(DEFAULT_ARGS);
-
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      if (event.data?.type === 'fig2code-preview-args') {
-        setArgs(applyPreviewArgs(event.data.args ?? {}));
-      } else if (event.data?.type === 'fig2code-preview-variants') {
-        setArgs(applyVariantSelection(event.data.variants ?? {}));
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, []);
-
-  useEffect(() => {
-    const label = Object.entries(VARIANTS)
-      .map(([key, values]) => {
-        const picked = args[key];
-        const value = typeof picked === 'string' && values.includes(picked) ? picked : (values[0] ?? '?');
-        return key + '=' + value;
-      })
-      .join(', ');
-    const el = document.getElementById('fig2code-variant-label');
-    if (el) el.textContent = label || DEFAULT_VARIANT_LABEL;
-  }, [args]);
-
-  useEffect(() => {
-    document.title = COMPONENT_NAME + ' · Preview';
-    const nameEl = document.getElementById('fig2code-component-label');
-    if (nameEl) nameEl.textContent = COMPONENT_NAME;
-  }, []);
-
-  useEffect(() => {
-    if (window.parent && window.parent !== window) {
-      window.parent.postMessage({ type: 'fig2code-preview-ready' }, '*');
-    }
-  }, []);
-
-  const Component = ${componentName};
-  return (
-    <PreviewErrorBoundary key={COMPONENT_NAME}>
-      <Component key={COMPONENT_NAME + ':' + JSON.stringify(args)} {...ensureHandlers(args)} />
-    </PreviewErrorBoundary>
-  );
-}
-
-let root: ReturnType<typeof createRoot> | null = null;
-
-function mountPreview() {
-  const container = document.getElementById('root');
-  if (!container) return;
-  if (root) {
-    root.unmount();
-    root = null;
-  }
-  root = createRoot(container);
-  root.render(<App />);
-}
-
-mountPreview();
-
-if (import.meta.hot) {
-  import.meta.hot.accept(() => {
-    mountPreview();
+  return generatePreviewMainTsx({
+    buildPreview,
+    componentName,
+    componentRepoPath,
+    useDefaultImport,
+    storyRepoPath: storybook?.storyRepoPath,
+    previewAnnotationsPath: storybook?.previewAnnotationsPath,
   });
 }
-`;
+
+async function resolvePreviewHarnessContext(
+  repoClonePath: string,
+  componentRepoPath: string,
+  buildPreview: JobBuildPreview,
+): Promise<{
+  harnessConfig: Awaited<ReturnType<typeof resolveHarnessTsConfig>>;
+  dependencyAliases: DependencyAlias[];
+  storybook?: Awaited<ReturnType<typeof resolveStorybookHarnessSupport>>;
+  viteAliases: Record<string, string>;
+  harnessDependencies: Record<string, string>;
+  tsInclude: string[];
+}> {
+  const harnessConfig = await resolveHarnessTsConfig(
+    repoClonePath,
+    componentRepoPath,
+  );
+  const storyRepoPath =
+    buildPreview.storyPath && !buildPreview.storyMissing
+      ? buildPreview.storyPath
+      : undefined;
+  const storybook = storyRepoPath
+    ? await resolveStorybookHarnessSupport(repoClonePath, storyRepoPath)
+    : undefined;
+
+  const dependencyAliases = await collectDependencyAliases(
+    repoClonePath,
+    harnessConfig.componentPackageRoot,
+  );
+
+  return {
+    harnessConfig,
+    dependencyAliases,
+    storybook,
+    viteAliases: mergeHarnessAliases(
+      harnessConfig.viteAliases,
+      storybook?.viteAliases ?? {},
+    ),
+    harnessDependencies: storybook?.harnessDependencies ?? {},
+    tsInclude: extendHarnessIncludeForStory(
+      harnessConfig.include,
+      storyRepoPath,
+      storybook?.previewAnnotationsPath,
+    ),
+  };
+}
+
+function storybookHarnessOptions(
+  buildPreview: JobBuildPreview,
+  storybook?: Awaited<ReturnType<typeof resolveStorybookHarnessSupport>>,
+): { storyRepoPath?: string; previewAnnotationsPath?: string } | undefined {
+  if (!buildPreview.storyPath || buildPreview.storyMissing) {
+    return undefined;
+  }
+  return {
+    storyRepoPath: buildPreview.storyPath,
+    previewAnnotationsPath: storybook?.previewAnnotationsPath,
+  };
 }
 
 function indentCss(css: string, spaces: number): string {
@@ -675,6 +641,7 @@ async function readStoryContent(
   repoClonePath: string,
   componentName: string,
   storyPath?: string,
+  componentRepoPath?: string,
 ): Promise<{ path?: string; content: string }> {
   if (storyPath) {
     try {
@@ -683,20 +650,22 @@ async function readStoryContent(
         content: await readFs(path.join(repoClonePath, storyPath), "utf-8"),
       };
     } catch {
-      // fall through to common storybook locations
+      // fall through to candidate lookup
     }
   }
 
-  const candidates = [
-    `apps/storybook/src/stories/${componentName}.stories.tsx`,
-    `apps/storybook/src/stories/${componentName}.stories.ts`,
-    `apps/storybook/src/stories/${componentName}.stories.jsx`,
-  ];
+  const candidates = componentRepoPath
+    ? buildStoryFileCandidates(componentRepoPath, componentName)
+    : [
+        `apps/storybook/src/stories/${componentName}.stories.tsx`,
+        `apps/storybook/src/stories/${componentName}.stories.ts`,
+        `apps/storybook/src/stories/${componentName}.stories.jsx`,
+      ];
 
   for (const candidate of candidates) {
     try {
       const content = await readFs(path.join(repoClonePath, candidate), "utf-8");
-      if (content.includes(componentName)) {
+      if (content.trim()) {
         return { path: candidate, content };
       }
     } catch {
@@ -730,17 +699,19 @@ async function loadExistingPreviewContext(
     );
   } catch {}
 
-  const componentName = componentContent
+  const exportName = componentContent
     ? extractComponentName(componentContent, options.componentName)
     : options.componentName;
+  const componentName = options.componentName;
   const useDefault = componentContent
-    ? isDefaultExport(componentContent, componentName)
+    ? isDefaultExport(componentContent, exportName)
     : false;
 
   const story = await readStoryContent(
     repoClonePath,
     componentName,
     options.storyPath,
+    componentRepoPath,
   );
   const previewMetadata = componentContent
     ? extractExistingPreviewMetadata(componentContent, story.content)
@@ -749,6 +720,7 @@ async function loadExistingPreviewContext(
   const buildPreview: JobBuildPreview = {
     componentName,
     storyFormat: story.content ? "csf3" : "none",
+    storyMissing: !story.content,
     componentPath: componentRepoPath,
     componentContent,
     storyPath: story.path ?? options.storyPath,
@@ -905,14 +877,111 @@ async function waitForViteReady(
   });
 }
 
+async function purgeHarnessInstall(harnessPath: string): Promise<void> {
+  await Promise.all([
+    rm(path.join(harnessPath, "node_modules"), { recursive: true, force: true }),
+    rm(path.join(harnessPath, ".fig2code-package-hash"), { force: true }),
+    rm(path.join(harnessPath, "node_modules", ".vite"), {
+      recursive: true,
+      force: true,
+    }),
+  ]);
+}
+
+async function harnessNeedsFreshInstall(harnessPath: string): Promise<boolean> {
+  const pkgPath = path.join(harnessPath, "package.json");
+  try {
+    const pkg = JSON.parse(await readFs(pkgPath, "utf-8")) as {
+      fig2codeHarnessVersion?: number;
+      dependencies?: Record<string, string>;
+    };
+    if ((pkg.fig2codeHarnessVersion ?? 0) < HARNESS_SCHEMA_VERSION) {
+      return true;
+    }
+    if (
+      Object.keys(pkg.dependencies ?? {}).some((name) =>
+        isStorybookToolingPackage(name),
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+
+  try {
+    await access(
+      path.join(harnessPath, "node_modules", "@storybook", "addon-essentials"),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function installHarnessDeps(harnessPath: string): Promise<void> {
-  if (await harnessDepsInstalled(harnessPath)) {
+  const pkgPath = path.join(harnessPath, "package.json");
+  let pkgContent = "";
+  try {
+    pkgContent = await readFs(pkgPath, "utf-8");
+  } catch {
+    throw new Error(`preview harness package.json missing at ${pkgPath}`);
+  }
+
+  let pkg = JSON.parse(pkgContent) as {
+    fig2codeHarnessVersion?: number;
+    dependencies?: Record<string, string>;
+  };
+  const sanitizedDeps = sanitizeStorybookHarnessDependencies({
+    vite: "^6.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    ...(pkg.dependencies ?? {}),
+  });
+  const normalizedPkg = {
+    ...pkg,
+    fig2codeHarnessVersion: HARNESS_SCHEMA_VERSION,
+    dependencies: sanitizedDeps,
+  };
+  const normalizedContent = `${JSON.stringify(normalizedPkg, null, 2)}\n`;
+  if (normalizedContent !== `${pkgContent.trimEnd()}\n`) {
+    await writeFile(pkgPath, normalizedContent, "utf-8");
+    pkgContent = normalizedContent;
+    console.log(`[fig2code] sanitized preview harness package.json`);
+  }
+
+  const pkgHash = createHash("sha256").update(pkgContent).digest("hex");
+  const hashPath = path.join(harnessPath, ".fig2code-package-hash");
+  let previousHash = "";
+  try {
+    previousHash = (await readFs(hashPath, "utf-8")).trim();
+  } catch {
+    // first install
+  }
+
+  const needsFreshInstall = await harnessNeedsFreshInstall(harnessPath);
+  if (needsFreshInstall) {
+    console.log(
+      `[fig2code] stale preview harness detected — purging node_modules for clean install`,
+    );
+    await purgeHarnessInstall(harnessPath);
+    previousHash = "";
+  }
+
+  if (
+    (await harnessDepsInstalled(harnessPath)) &&
+    previousHash === pkgHash
+  ) {
     console.log(`[fig2code] harness deps already installed — skipping npm install`);
     return;
   }
 
+  if (previousHash && previousHash !== pkgHash) {
+    console.log(`[fig2code] harness package.json changed — reinstalling deps`);
+    await purgeHarnessInstall(harnessPath);
+  }
+
   const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
-  return new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     const child = spawn(
       npmBin,
       ["install", "--no-audit", "--no-fund", "--loglevel", "error"],
@@ -940,6 +1009,8 @@ async function installHarnessDeps(harnessPath: string): Promise<void> {
 
     child.on("error", reject);
   });
+
+  await writeFile(hashPath, pkgHash, "utf-8");
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,11 +1084,12 @@ export function createPreviewSessionManager(
 
     const componentContent = buildPreview.componentContent ?? "";
     const storyContent = buildPreview.storyContent ?? "";
-    const componentName = extractComponentName(
+    const componentName = buildPreview.componentName;
+    const exportName = extractComponentName(
       componentContent,
-      buildPreview.componentName,
+      componentName,
     );
-    const useDefault = isDefaultExport(componentContent, componentName);
+    const useDefault = isDefaultExport(componentContent, exportName);
 
     // Determine the real repo path for the component
     const componentRepoPath =
@@ -1054,34 +1126,36 @@ export function createPreviewSessionManager(
     }
 
     // 4. Write the preview harness files
-    const harnessConfig = await resolveHarnessTsConfig(
+    const previewHarness = await resolvePreviewHarnessContext(
       repoClonePath,
       componentRepoPath,
+      buildPreview,
     );
-    const dependencyAliases = await collectDependencyAliases(
-      repoClonePath,
-      harnessConfig.componentPackageRoot,
+    const sbOptions = storybookHarnessOptions(
+      buildPreview,
+      previewHarness.storybook,
     );
 
     const harnessFiles: Array<[string, string]> = [
       [
         path.join(harnessPath, "package.json"),
-        generateHarnessPackageJson(),
+        generateHarnessPackageJson(previewHarness.harnessDependencies),
       ],
       [
         path.join(harnessPath, "vite.config.ts"),
         generateHarnessViteConfig(
           `/jobs/${jobId}/preview/`,
-          harnessConfig.viteAliases,
-          harnessConfig.reactModules,
-          dependencyAliases,
+          previewHarness.viteAliases,
+          previewHarness.harnessConfig.reactModules,
+          previewHarness.dependencyAliases,
+          previewHarness.storybook?.optimizeIncludes ?? [],
         ),
       ],
       [
         path.join(harnessPath, "tsconfig.json"),
         generateHarnessTsConfig({
-          paths: harnessConfig.tsPaths,
-          include: harnessConfig.include,
+          paths: previewHarness.harnessConfig.tsPaths,
+          include: previewHarness.tsInclude,
         }),
       ],
       [
@@ -1095,6 +1169,7 @@ export function createPreviewSessionManager(
           componentName,
           useDefault,
           componentRepoPath,
+          sbOptions,
         ),
       ],
     ];
@@ -1225,9 +1300,14 @@ export function createPreviewSessionManager(
     ctx: ExistingPreviewContext,
     mode: "full" | "swap",
   ): Promise<void> {
-    const harnessConfig = await resolveHarnessTsConfig(
+    const previewHarness = await resolvePreviewHarnessContext(
       repoClonePath,
       ctx.componentRepoPath,
+      ctx.buildPreview,
+    );
+    const sbOptions = storybookHarnessOptions(
+      ctx.buildPreview,
+      previewHarness.storybook,
     );
     const previewTheme = await resolvePreviewTheme(
       repoClonePath,
@@ -1236,14 +1316,6 @@ export function createPreviewSessionManager(
     );
     const mainModuleSrc =
       mode === "swap" ? `/main.tsx?v=${Date.now()}` : "/main.tsx";
-
-    const dependencyAliases =
-      mode === "full"
-        ? await collectDependencyAliases(
-            repoClonePath,
-            harnessConfig.componentPackageRoot,
-          )
-        : [];
 
     if (mode === "swap") {
       await Promise.all([
@@ -1254,6 +1326,7 @@ export function createPreviewSessionManager(
             ctx.componentName,
             ctx.useDefault,
             ctx.componentRepoPath,
+            sbOptions,
           ),
           "utf-8",
         ),
@@ -1277,21 +1350,25 @@ export function createPreviewSessionManager(
     }
 
     const files: Array<[string, string]> = [
-      [path.join(harnessPath, "package.json"), generateHarnessPackageJson()],
+      [
+        path.join(harnessPath, "package.json"),
+        generateHarnessPackageJson(previewHarness.harnessDependencies),
+      ],
       [
         path.join(harnessPath, "vite.config.ts"),
         generateHarnessViteConfig(
           `/preview/existing/${sessionId}/`,
-          harnessConfig.viteAliases,
-          harnessConfig.reactModules,
-          dependencyAliases,
+          previewHarness.viteAliases,
+          previewHarness.harnessConfig.reactModules,
+          previewHarness.dependencyAliases,
+          previewHarness.storybook?.optimizeIncludes ?? [],
         ),
       ],
       [
         path.join(harnessPath, "tsconfig.json"),
         generateHarnessTsConfig({
-          paths: harnessConfig.tsPaths,
-          include: harnessConfig.include,
+          paths: previewHarness.harnessConfig.tsPaths,
+          include: previewHarness.tsInclude,
         }),
       ],
       [
@@ -1315,6 +1392,7 @@ export function createPreviewSessionManager(
           ctx.componentName,
           ctx.useDefault,
           ctx.componentRepoPath,
+          sbOptions,
         ),
       ],
     ];
@@ -1480,24 +1558,33 @@ export function createPreviewSessionManager(
     const work = (async () => {
       const ctx = await loadExistingPreviewContext(session.repoClonePath, options);
 
-      if (
+      const harnessStale = await harnessNeedsFreshInstall(session.harnessPath);
+      const sameComponent =
         session.componentPath === ctx.componentRepoPath &&
-        session.componentName === ctx.componentName
-      ) {
+        session.componentName === ctx.componentName;
+
+      if (sameComponent && !harnessStale) {
         session.lastAccessedAt = Date.now();
         return session;
       }
 
-      console.log(
-        `[fig2code] swapping preview component → ${ctx.componentName} (${ctx.componentRepoPath})`,
-      );
+      if (sameComponent && harnessStale) {
+        console.log(
+          `[fig2code] stale preview harness detected — upgrading before render`,
+        );
+      } else {
+        console.log(
+          `[fig2code] swapping preview component → ${ctx.componentName} (${ctx.componentRepoPath})`,
+        );
+      }
 
       const harnessConfig = await resolveHarnessTsConfig(
         session.repoClonePath,
         ctx.componentRepoPath,
       );
       const configKey = stableHarnessConfigKey(harnessConfig);
-      const configChanged = session.harnessConfigKey !== configKey;
+      const configChanged =
+        harnessStale || session.harnessConfigKey !== configKey;
 
       session.ready = false;
       try {

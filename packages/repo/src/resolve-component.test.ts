@@ -137,4 +137,67 @@ describe("resolveComponentBundle", () => {
       "src/components/forms/Button/Button.tsx",
     );
   });
+
+  it("resolves spaced Figma names to PascalCase stories", async () => {
+    const files: Record<string, string> = {
+      "packages/ui/src/components/ui/inline-alert.tsx":
+        "export const InlineAlert = () => null;",
+      "apps/storybook/src/stories/InlineAlert.stories.tsx": `
+const meta = { args: { type: "Warning" } };
+export default meta;
+`,
+    };
+
+    const bundle = await resolveComponentBundle({
+      componentName: "Inline Alert",
+      syncConfig: {
+        ...baseSyncConfig,
+        web: {
+          ...baseSyncConfig.web!,
+          componentPath: "packages/ui/src/components/ui",
+        },
+      },
+      readFile: async (path) => files[path] ?? null,
+    });
+
+    assert.ok(bundle);
+    assert.equal(bundle!.componentName, "InlineAlert");
+    assert.equal(
+      bundle!.storyPath,
+      "apps/storybook/src/stories/InlineAlert.stories.tsx",
+    );
+  });
+
+  it("falls back to apps/storybook stories when no colocated story exists", async () => {
+    const files: Record<string, string> = {
+      "packages/ui/src/components/ui/avatar.tsx":
+        "export const Avatar = () => null;",
+      "apps/storybook/src/stories/Avatar.stories.tsx": `
+const meta = { args: { type: "Initial", initials: "JD" } };
+export default meta;
+`,
+    };
+
+    const bundle = await resolveComponentBundle({
+      componentName: "Avatar",
+      syncConfig: {
+        ...baseSyncConfig,
+        web: {
+          ...baseSyncConfig.web!,
+          componentPath: "packages/ui/src/components/ui",
+        },
+      },
+      readFile: async (path) => files[path] ?? null,
+    });
+
+    assert.ok(bundle);
+    assert.equal(
+      bundle!.storyPath,
+      "apps/storybook/src/stories/Avatar.stories.tsx",
+    );
+    assert.equal(
+      bundle!.files.find((file) => file.role === "story")?.path,
+      "apps/storybook/src/stories/Avatar.stories.tsx",
+    );
+  });
 });

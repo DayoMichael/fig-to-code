@@ -57,6 +57,8 @@ export async function resolveComponentBundle(
     return null;
   }
 
+  const canonicalName = canonicalComponentNameFromPath(primary.candidate.path) || componentName;
+
   const matched: ResolvedComponentFile = {
     path: primary.candidate.path,
     role: "component",
@@ -65,7 +67,7 @@ export async function resolveComponentBundle(
 
   const colocated = await loadColocatedFiles(
     primary.candidate.path,
-    componentName,
+    canonicalName,
     input.readFile,
   );
 
@@ -78,7 +80,7 @@ export async function resolveComponentBundle(
   };
 
   return {
-    componentName,
+    componentName: canonicalName,
     match,
     files,
     primaryComponentPath: matched.path,
@@ -255,13 +257,7 @@ async function loadColocatedFiles(
   const dir = dirname(componentPath);
   const fileName = basename(componentPath);
   const baseName = fileName.replace(/\.(tsx|jsx|ts|js)$/i, "");
-
-  const storyCandidates = [
-    join(dir, `${baseName}.stories.tsx`),
-    join(dir, `${baseName}.stories.ts`),
-    join(dir, `${baseName}.stories.jsx`),
-    join(dir, `${componentName}.stories.tsx`),
-  ];
+  const storyCandidates = buildStoryFileCandidates(componentPath, componentName);
 
   const testCandidates = [
     join(dir, `${baseName}.test.tsx`),
@@ -363,4 +359,48 @@ function truncate(content: string): string {
   }
   const slice = content.slice(0, MAX_FILE_BYTES);
   return `${slice}\n// ...[truncated by fig2code resolve]`;
+}
+
+/** PascalCase name derived from a component file path (kebab, camel, or spaced input file). */
+export function canonicalComponentNameFromPath(componentPath: string): string {
+  const baseName = basename(componentPath).replace(/\.(tsx|jsx|ts|js)$/i, "");
+  return toPascalCase(baseName);
+}
+
+/** Story file paths to probe for a component, including Storybook app conventions. */
+export function buildStoryFileCandidates(
+  componentPath: string,
+  componentName: string,
+): string[] {
+  const dir = dirname(componentPath);
+  const fileName = basename(componentPath);
+  const baseName = fileName.replace(/\.(tsx|jsx|ts|js)$/i, "");
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const push = (candidate: string): void => {
+    const normalized = normalizePath(candidate);
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  };
+
+  for (const ext of [".stories.tsx", ".stories.ts", ".stories.jsx"]) {
+    push(join(dir, `${baseName}${ext}`));
+  }
+
+  for (const variant of nameVariantsFor(componentName)) {
+    const pascal = toPascalCase(variant);
+    const kebab = toKebabCase(variant);
+    for (const ext of [".stories.tsx", ".stories.ts", ".stories.jsx"]) {
+      push(join(dir, `${pascal}${ext}`));
+      push(join(dir, `${kebab}${ext}`));
+      push(`apps/storybook/src/stories/${pascal}${ext}`);
+      push(`apps/storybook/src/stories/${kebab}${ext}`);
+    }
+  }
+
+  return out;
 }

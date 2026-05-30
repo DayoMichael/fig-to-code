@@ -6,6 +6,15 @@ export {
 } from "./pipeline.js";
 export type { CodegenContext, CodegenRunResult, GateRunnerOptions } from "./pipeline.js";
 export {
+  ensureCodegenScaffolds,
+  planCodegenFiles,
+  buildStoryScaffold,
+  buildTestScaffold,
+  buildBarrelScaffold,
+  buildPackageIndexAppendPatch,
+} from "./scaffold.js";
+export type { CodegenFilePlan } from "./scaffold.js";
+export {
   buildJobPreview,
   previewFullText,
   previewSnippet,
@@ -50,7 +59,13 @@ export {
   extractComponentPropControls,
   extractComponentDefaultPropValues,
   buildPreviewPropControls,
+  pickDefaultStoryExportName,
 } from "./preview-utils.js";
+export {
+  generatePreviewMainTsx,
+  usesStorybookPreview,
+} from "./story-preview-harness.js";
+export type { PreviewMainTsxInput } from "./story-preview-harness.js";
 export type {
   StoryPreviewTarget,
   PreviewPropControl,

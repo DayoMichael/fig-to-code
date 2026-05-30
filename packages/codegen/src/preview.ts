@@ -76,6 +76,7 @@ export function buildJobPreview(input: BuildJobPreviewInput): JobBuildPreview {
     storyContent,
     componentPath: componentPatch?.path,
     componentContent,
+    storyMissing: storyFormat !== "none" && !storyPatch?.content,
     variantLabel: hasExtractedVariants
       ? previewMetadata!.variantLabel
       : formatVariantLabel(prunedSpec, storyExport),

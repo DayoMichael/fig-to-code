@@ -11,15 +11,26 @@ const COMPONENT_NAME_UTILITY_SUFFIX_RE =
 
 const PASCAL_CASE_RE = /^[A-Z][A-Za-z0-9_]*$/;
 
+const TYPE_ONLY_EXPORT_SUFFIX_RE = /(?:Props|Element|Type|Ref)$/;
+
+const COMPOUND_SUBPART_SUFFIX_RE =
+  /(?:Trigger|Content|Viewport|Header|Footer|Title|Description|Item|Group|Panel|Handle|Indicator|Label|Value|Anchor|Arrow|Close|Cancel|Action|Overlay|Portal|List|Input|Separator|Thumb|Track|Icon|Smart|Field|Form)$/;
+
 /**
  * Identify the React component declaration the preview should render.
  *
- * Strong signals (forwardRef / memo / function components named in PascalCase)
- * win over generic `export const X = ...`, avoiding utility exports like
- * `buttonVariants` being picked and causing React's
- * "Element type is invalid … got: object" runtime error.
+ * Compound files (Select, Dialog, Tooltip, …) often declare sub-part
+ * forwardRefs before the root export. Prefer the export block / filename
+ * fallback over the first forwardRef match.
  */
 export function extractComponentName(source: string, fallback: string): string {
+  const exportNames = parseExportBlockNames(source);
+
+  const fallbackFromExports = pickExportName(exportNames, fallback, source);
+  if (fallbackFromExports) {
+    return fallbackFromExports;
+  }
+
   const strongPatterns: RegExp[] = [
     /export\s+const\s+([A-Z]\w*)\s*=\s*(?:React\.)?forwardRef\b/,
     /export\s+const\s+([A-Z]\w*)\s*=\s*(?:React\.)?memo\b/,
@@ -34,7 +45,11 @@ export function extractComponentName(source: string, fallback: string): string {
   for (const pattern of strongPatterns) {
     const match = source.match(pattern);
     const name = match?.[1];
-    if (name && !looksLikeUtility(name)) {
+    if (
+      name &&
+      !looksLikeUtility(name) &&
+      !isCompoundSubpartName(name, fallback, exportNames)
+    ) {
       return name;
     }
   }
@@ -44,10 +59,19 @@ export function extractComponentName(source: string, fallback: string): string {
     return defaultIdentifier[1];
   }
 
-  const pascalConstPattern = /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Z]\w*)\s*=/g;
-  for (let match = pascalConstPattern.exec(source); match; match = pascalConstPattern.exec(source)) {
+  const pascalConstPattern =
+    /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Z]\w*)\s*=/g;
+  for (
+    let match = pascalConstPattern.exec(source);
+    match;
+    match = pascalConstPattern.exec(source)
+  ) {
     const name = match[1];
-    if (name && !looksLikeUtility(name)) {
+    if (
+      name &&
+      !looksLikeUtility(name) &&
+      !isCompoundSubpartName(name, fallback, exportNames)
+    ) {
       return name;
     }
   }
@@ -57,6 +81,114 @@ export function extractComponentName(source: string, fallback: string): string {
   }
 
   return fallback;
+}
+
+/** Parse `export { A, B, type C }` names in source order. */
+export function parseExportBlockNames(source: string): string[] {
+  const blockMatch = source.match(/export\s*\{([\s\S]*?)\}\s*;?/);
+  if (!blockMatch?.[1]) {
+    return [];
+  }
+
+  const names: string[] = [];
+  for (const match of blockMatch[1].matchAll(/\b([A-Z][A-Za-z0-9_]*)\b/g)) {
+    const name = match[1]!;
+    if (!names.includes(name)) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function pickExportName(
+  exportNames: string[],
+  fallback: string,
+  source: string,
+): string | null {
+  if (exportNames.length === 0) {
+    return null;
+  }
+
+  const exact = exportNames.find((name) => name === fallback);
+  if (exact && isExportableComponentName(exact) && isLikelyRootComponent(source, exact)) {
+    return exact;
+  }
+
+  const caseInsensitive = exportNames.find(
+    (name) => name.toLowerCase() === fallback.toLowerCase(),
+  );
+  if (
+    caseInsensitive &&
+    isExportableComponentName(caseInsensitive) &&
+    isLikelyRootComponent(source, caseInsensitive)
+  ) {
+    return caseInsensitive;
+  }
+
+  const prefixMatch = exportNames.find(
+    (name) =>
+      name.startsWith(fallback) &&
+      isExportableComponentName(name) &&
+      isLikelyRootComponent(source, name),
+  );
+  if (prefixMatch) {
+    return prefixMatch;
+  }
+
+  for (const name of exportNames) {
+    if (
+      isExportableComponentName(name) &&
+      !isProviderOrContextExport(name) &&
+      !isCompoundSubpartName(name, fallback, exportNames) &&
+      isLikelyRootComponent(source, name)
+    ) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+function isExportableComponentName(name: string): boolean {
+  if (!PASCAL_CASE_RE.test(name)) {
+    return false;
+  }
+  if (looksLikeUtility(name)) {
+    return false;
+  }
+  if (TYPE_ONLY_EXPORT_SUFFIX_RE.test(name)) {
+    return false;
+  }
+  return true;
+}
+
+function isProviderOrContextExport(name: string): boolean {
+  return /(?:Provider|Context|Consumer)$/.test(name);
+}
+
+function isCompoundSubpartName(
+  name: string,
+  fallback: string,
+  exportNames: string[],
+): boolean {
+  if (name === fallback) {
+    return false;
+  }
+  if (exportNames.includes(fallback)) {
+    return COMPOUND_SUBPART_SUFFIX_RE.test(name);
+  }
+  return COMPOUND_SUBPART_SUFFIX_RE.test(name) && name !== fallback;
+}
+
+function isLikelyRootComponent(source: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rootPattern = new RegExp(
+    `(?:const|let|var)\\s+${escaped}\\s*=\\s*[\\w.]+(?:\\.Root|Primitive\\.Root)\\b`,
+  );
+  if (rootPattern.test(source)) {
+    return true;
+  }
+  return sourceDeclaresIdentifier(source, name);
 }
 
 function looksLikeUtility(name: string): boolean {
@@ -156,6 +288,33 @@ export function defaultPreviewArgs(preview: JobBuildPreview): Record<string, unk
     preview.storyContent,
   );
   return enrichPreviewArgs(args, preview.componentName);
+}
+
+/** Pick the primary story export to preview (Default first, then first Story export). */
+export function pickDefaultStoryExportName(storyContent: string): string {
+  if (/\bexport const Default\b/.test(storyContent)) {
+    return "Default";
+  }
+
+  for (const match of storyContent.matchAll(
+    /\bexport const ([A-Z][A-Za-z0-9_]*)\s*:\s*Story\b/g,
+  )) {
+    const name = match[1]!;
+    if (name !== "Default") {
+      return name;
+    }
+  }
+
+  for (const match of storyContent.matchAll(
+    /\bexport const ([A-Z][A-Za-z0-9_]*)\s*=\s*\{/g,
+  )) {
+    const name = match[1]!;
+    if (!name.endsWith("Props") && name !== "meta") {
+      return name;
+    }
+  }
+
+  return "Default";
 }
 
 export function extractHandlerPropNames(source: string): string[] {
@@ -431,12 +590,27 @@ export function extractStoryArgTypeOptions(source: string): Record<string, strin
   return options;
 }
 
-/** Extract default args from a Storybook meta block. */
+/** Extract default args from a Storybook meta block or named story export. */
 export function extractStoryDefaultArgs(source: string): Record<string, unknown> {
   const metaIndex = source.search(/\bconst\s+meta\b/);
-  const slice = metaIndex >= 0 ? source.slice(metaIndex) : source;
-  const argsBlock = extractObjectLiteralAfterKey(slice, "args:");
-  if (!argsBlock) {
+  const metaSlice = metaIndex >= 0 ? source.slice(metaIndex) : source;
+  const metaArgs = parseStoryArgsObject(
+    extractObjectLiteralAfterKey(metaSlice, "args:") ?? "",
+  );
+
+  const storyExportMatch = source.match(
+    /export\s+const\s+(?:Default|[A-Z][A-Za-z0-9_]*)\s*=\s*\{[\s\S]*?\bargs\s*:\s*\{/,
+  );
+  const storySlice = storyExportMatch?.[0] ? source.slice(source.indexOf(storyExportMatch[0])) : "";
+  const storyArgs = parseStoryArgsObject(
+    extractObjectLiteralAfterKey(storySlice, "args:") ?? "",
+  );
+
+  return { ...storyArgs, ...metaArgs };
+}
+
+function parseStoryArgsObject(argsBlock: string): Record<string, unknown> {
+  if (!argsBlock.trim()) {
     return {};
   }
 
@@ -446,13 +620,22 @@ export function extractStoryDefaultArgs(source: string): Record<string, unknown>
   )) {
     args[match[1]!] = match[3]!;
   }
-  for (const match of argsBlock.matchAll(/([\w-]+)\s*:\s*(true|false)\b/g)) {
-    args[match[1]!] = match[2] === "true";
+  for (const match of argsBlock.matchAll(/([\w-]+)\s*:\s*(true|false|null)\b/g)) {
+    const value = match[2]!;
+    args[match[1]!] = value === "null" ? null : value === "true";
   }
   for (const match of argsBlock.matchAll(
     /([\w-]+)\s*:\s*(-?\d+(?:\.\d+)?)\b/g,
   )) {
     args[match[1]!] = Number(match[2]);
+  }
+  for (const match of argsBlock.matchAll(/([\w-]+)\s*:\s*(\[[\s\S]*?\]|\{[\s\S]*?\})/g)) {
+    const raw = match[2]!.trim();
+    try {
+      args[match[1]!] = JSON.parse(raw.replace(/'/g, '"').replace(/(\w+)\s*:/g, '"$1":'));
+    } catch {
+      args[match[1]!] = raw;
+    }
   }
   return args;
 }

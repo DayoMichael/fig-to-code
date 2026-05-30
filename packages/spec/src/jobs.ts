@@ -84,6 +84,8 @@ export interface JobBuildPreview {
   variants?: Record<string, string[]>;
   /** Editable non-variant props for live preview controls. */
   propControls?: JobBuildPreviewPropControl[];
+  /** True when preview falls back to component source (no linked Storybook story). */
+  storyMissing?: boolean;
   /** All generated/edited files from codegen patches. */
   files?: JobBuildPreviewFile[];
   /** CSS variable definitions for design tokens used in the component. */

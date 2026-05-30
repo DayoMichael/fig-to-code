@@ -66,6 +66,7 @@ const buildPreviewPreviewPane = document.getElementById("build-preview-preview-p
 const buildPreviewCodePane = document.getElementById("build-preview-code-pane")!;
 const buildPreviewFormatEl = document.getElementById("build-preview-format")!;
 const buildPreviewVariantEl = document.getElementById("build-preview-variant")!;
+const buildPreviewStoryNoticeEl = document.getElementById("build-preview-story-notice")!;
 const buildPreviewSelectControlsEl = document.getElementById("build-preview-select-controls")!;
 const buildPreviewInputControlsEl = document.getElementById("build-preview-input-controls")!;
 const buildPreviewBooleanControlsEl = document.getElementById("build-preview-boolean-controls")!;
@@ -99,6 +100,23 @@ const copyPreviewFileBtn = document.getElementById("copy-preview-file") as HTMLB
 const buildCorrectionsEl = document.getElementById("build-corrections") as HTMLTextAreaElement;
 const expandPreviewBtn = document.getElementById("expand-preview") as HTMLButtonElement;
 const rebuildWithCorrectionsBtn = document.getElementById("rebuild-with-corrections") as HTMLButtonElement;
+const createPrBtn = document.getElementById("create-pr") as HTMLButtonElement;
+const prModalEl = document.getElementById("pr-modal")!;
+const prModalBackdropEl = document.getElementById("pr-modal-backdrop")!;
+const prTargetBranchEl = document.getElementById("pr-target-branch") as HTMLSelectElement;
+const confirmCreatePrBtn = document.getElementById("confirm-create-pr") as HTMLButtonElement;
+const cancelCreatePrBtn = document.getElementById("cancel-create-pr") as HTMLButtonElement;
+const prDiffFileTreeEl = document.getElementById("pr-diff-file-tree")!;
+const prDiffPathEl = document.getElementById("pr-diff-path")!;
+const prDiffContentEl = document.getElementById("pr-diff-content")!;
+const prDiffSummaryEl = document.getElementById("pr-diff-summary")!;
+const prDiffWorkbenchEl = document.getElementById("pr-diff-workbench")!;
+const togglePrDiffSidebarBtn = document.getElementById("toggle-pr-diff-sidebar") as HTMLButtonElement;
+const prModalErrorEl = document.getElementById("pr-modal-error")!;
+const prModalSuccessEl = document.getElementById("pr-modal-success")!;
+const prModalFormEl = document.getElementById("pr-modal-form")!;
+const prModalSuccessLinkEl = document.getElementById("pr-modal-success-link") as HTMLButtonElement;
+
 const matchSectionEl = document.getElementById("match-section")!;
 const matchNameEl = document.getElementById("match-name")!;
 const matchReasonEl = document.getElementById("match-reason")!;
@@ -154,6 +172,7 @@ type BuildPreview = {
   storyFormat: "csf3" | "csf2" | "none";
   storyPath?: string;
   storyContent?: string;
+  storyMissing?: boolean;
   componentPath?: string;
   componentContent?: string;
   variantLabel: string;
@@ -210,6 +229,13 @@ let codeSidebarExpanded = true;
 let selectedPreviewFilePath: string | null = null;
 let selectedPreviewFileContent = "";
 const editedFiles = new Set<string>();
+const repoBaselineContent = new Map<string, string>();
+let cachedBranchNames: string[] = [];
+let savedDefaultPrTarget = "main";
+let currentJobStatus: string | null = null;
+let currentJobPrUrl: string | null = null;
+let pendingPrModalOpen = false;
+
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let savedFadeTimer: ReturnType<typeof setTimeout> | null = null;
 let previewActionLog: PreviewActionEntry[] = [];
@@ -225,6 +251,7 @@ const actionButtons = [
   rebuildWithCorrectionsBtn,
   disconnectBtn,
   pushBtn,
+  createPrBtn,
 ];
 
 for (const btn of actionButtons) {
@@ -414,7 +441,752 @@ function syncDefaultDisabled() {
   toggleAskBtn.disabled = busy || !onMain || !currentBuildPreview;
   syncAskToggleVisibility();
   expandPreviewBtn.disabled = busy || !currentPreviewUrl;
+  syncCreatePrButtonState();
+  syncPrModalState();
 }
+
+type PrDiffFile = {
+  path: string;
+  action: "create" | "update";
+  oldContent: string;
+  newContent: string;
+};
+
+type PrDiffLine = {
+  type: "context" | "add" | "remove";
+  oldNum?: number;
+  newNum?: number;
+  text: string;
+};
+
+type PrDiffSideRow = {
+  type: "context" | "remove" | "add" | "change";
+  oldNum?: number;
+  newNum?: number;
+  oldText?: string;
+  newText?: string;
+};
+
+type PrDiffDisplayItem =
+  | { kind: "row"; row: PrDiffSideRow }
+  | { kind: "gap"; hiddenCount: number; gapKey: string };
+
+const PR_DIFF_CONTEXT_LINES = 3;
+
+let selectedPrDiffPath: string | null = null;
+let prDiffSidebarExpanded = true;
+const prDiffExpandedGaps = new Set<string>();
+let prModalOpenedUrl: string | null = null;
+
+
+function normalizePreviewPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function normalizePreviewContent(content: string): string {
+  return content.replace(/\r\n/g, "\n").trimEnd();
+}
+
+function snapshotPreviewContent(preview: BuildPreview | null): Map<string, string> {
+  const snapshot = new Map<string, string>();
+  if (!preview) return snapshot;
+  for (const file of getPreviewFiles(preview)) {
+    if (file.content !== undefined) {
+      snapshot.set(normalizePreviewPath(file.path), file.content);
+    }
+  }
+  return snapshot;
+}
+
+function getCodeEditorValue(): string {
+  const inline = inlineCodeExplorer.codeEditor.value;
+  const modal = modalCodeExplorer.codeEditor.value;
+  if (inline === modal) return inline;
+  if (inline !== selectedPreviewFileContent) return inline;
+  if (modal !== selectedPreviewFileContent) return modal;
+  return inline;
+}
+
+function buildEffectivePreviewSnapshot(preview: BuildPreview | null): Map<string, string> {
+  const snapshot = snapshotPreviewContent(preview);
+  if (!preview || !selectedPreviewFilePath || inlineCodeExplorer.codeEditor.disabled) {
+    return snapshot;
+  }
+
+  snapshot.set(normalizePreviewPath(selectedPreviewFilePath), getCodeEditorValue());
+  return snapshot;
+}
+
+function setRepoBaselineFromBundle(bundle: ResolvedBundleSummary | null) {
+  repoBaselineContent.clear();
+  if (!bundle) return;
+  for (const file of bundle.files) {
+    repoBaselineContent.set(normalizePreviewPath(file.path), file.content);
+  }
+}
+
+function previewDiffersFromRepoBaseline(preview: BuildPreview | null = currentBuildPreview): boolean {
+  if (!preview) return false;
+  const current = buildEffectivePreviewSnapshot(preview);
+  if (current.size === 0) return false;
+
+  if (repoBaselineContent.size === 0) {
+    return [...current.values()].some((content) => normalizePreviewContent(content).trim().length > 0);
+  }
+
+  for (const [path, content] of current) {
+    const baseline = repoBaselineContent.get(path);
+    if (baseline === undefined) {
+      if (normalizePreviewContent(content).trim()) return true;
+      continue;
+    }
+    if (normalizePreviewContent(baseline) !== normalizePreviewContent(content)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function canOpenPullRequest(): boolean {
+  if (!currentBuildPreview || currentJobPrUrl) return false;
+  if (!previewDiffersFromRepoBaseline()) return false;
+
+  if (currentPreviewJobId && currentJobStatus === "validated") {
+    return true;
+  }
+
+  return componentWorkflowMode === "update" && Boolean(currentResolvedBundle);
+}
+
+function collectPrDiffPatches(): Array<{ path: string; action: "create" | "update"; content: string }> {
+  return collectPrDiffFiles().map((file) => ({
+    path: file.path,
+    action: file.action === "create" ? "create" : "update",
+    content: file.newContent,
+  }));
+}
+
+function syncCreatePrButtonState() {
+  flushCurrentEdit();
+  const onMain = isOnMainScreen();
+
+  if (currentJobPrUrl) {
+    createPrBtn.disabled = !onMain || loading;
+    createPrBtn.textContent = "View PR";
+    return;
+  }
+
+  const canCreatePr = !loading && onMain && canOpenPullRequest();
+  createPrBtn.disabled = !canCreatePr;
+  createPrBtn.textContent = createPrBtn.dataset.label ?? "Create PR";
+}
+
+function openExternalUrl(url: string) {
+  parent.postMessage({ pluginMessage: { type: "open-external-url", url } }, "*");
+}
+
+function fillPrTargetBranchSelect(names: string[]) {
+  cachedBranchNames = [...names].sort();
+  if (cachedBranchNames.length === 0 && savedDefaultPrTarget) {
+    cachedBranchNames = [savedDefaultPrTarget];
+  }
+  const html = cachedBranchNames.map((name) => `<option value="${name}">${name}</option>`).join("");
+  prTargetBranchEl.innerHTML = html;
+
+  const preferred = cachedBranchNames.includes(savedDefaultPrTarget)
+    ? savedDefaultPrTarget
+    : cachedBranchNames.includes("main")
+      ? "main"
+      : cachedBranchNames.includes("master")
+        ? "master"
+        : cachedBranchNames[0];
+
+  if (preferred) {
+    prTargetBranchEl.value = preferred;
+  }
+}
+
+function collectPrDiffFiles(): PrDiffFile[] {
+  flushCurrentEdit();
+  if (!currentBuildPreview) return [];
+
+  const current = buildEffectivePreviewSnapshot(currentBuildPreview);
+  const files: PrDiffFile[] = [];
+
+  for (const [path, newContent] of current) {
+    const normalizedNew = normalizePreviewContent(newContent);
+    if (!normalizedNew.trim()) continue;
+
+    const baseline = repoBaselineContent.get(path);
+    if (baseline === undefined) {
+      files.push({ path, action: "create", oldContent: "", newContent: normalizedNew });
+      continue;
+    }
+
+    const normalizedOld = normalizePreviewContent(baseline);
+    if (normalizedOld !== normalizedNew) {
+      files.push({
+        path,
+        action: "update",
+        oldContent: normalizedOld,
+        newContent: normalizedNew,
+      });
+    }
+  }
+
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function computeLineDiff(oldText: string, newText: string): PrDiffLine[] {
+  const oldLines = oldText.length > 0 ? oldText.split("\n") : [];
+  const newLines = newText.split("\n");
+  const rows = oldLines.length + 1;
+  const cols = newLines.length + 1;
+  const dp: number[][] = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+  for (let i = oldLines.length - 1; i >= 0; i--) {
+    for (let j = newLines.length - 1; j >= 0; j--) {
+      dp[i]![j] =
+        oldLines[i] === newLines[j]
+          ? dp[i + 1]![j + 1]! + 1
+          : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+    }
+  }
+
+  const result: PrDiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+      result.push({
+        type: "context",
+        oldNum: i + 1,
+        newNum: j + 1,
+        text: oldLines[i]!,
+      });
+      i += 1;
+      j += 1;
+      continue;
+    }
+
+    if (j < newLines.length && (i >= oldLines.length || dp[i]![j + 1]! >= dp[i + 1]![j]!)) {
+      result.push({ type: "add", newNum: j + 1, text: newLines[j]! });
+      j += 1;
+      continue;
+    }
+
+    result.push({ type: "remove", oldNum: i + 1, text: oldLines[i]! });
+    i += 1;
+  }
+
+  return result;
+}
+
+
+function buildSideBySideRows(file: PrDiffFile): PrDiffSideRow[] {
+  if (file.action === "create") {
+    return file.newContent.split("\n").map((line, index) => ({
+      type: "add" as const,
+      newNum: index + 1,
+      newText: line,
+    }));
+  }
+
+  const unified = computeLineDiff(file.oldContent, file.newContent);
+  const rows: PrDiffSideRow[] = [];
+  let index = 0;
+
+  while (index < unified.length) {
+    const line = unified[index]!;
+    if (line.type === "context") {
+      rows.push({
+        type: "context",
+        oldNum: line.oldNum,
+        newNum: line.newNum,
+        oldText: line.text,
+        newText: line.text,
+      });
+      index += 1;
+      continue;
+    }
+
+    const removes: PrDiffLine[] = [];
+    const adds: PrDiffLine[] = [];
+    while (index < unified.length && unified[index]!.type === "remove") {
+      removes.push(unified[index]!);
+      index += 1;
+    }
+    while (index < unified.length && unified[index]!.type === "add") {
+      adds.push(unified[index]!);
+      index += 1;
+    }
+
+    const pairCount = Math.max(removes.length, adds.length);
+    for (let pairIndex = 0; pairIndex < pairCount; pairIndex += 1) {
+      const remove = removes[pairIndex];
+      const add = adds[pairIndex];
+      if (remove && add) {
+        rows.push({
+          type: "change",
+          oldNum: remove.oldNum,
+          newNum: add.newNum,
+          oldText: remove.text,
+          newText: add.text,
+        });
+      } else if (remove) {
+        rows.push({
+          type: "remove",
+          oldNum: remove.oldNum,
+          oldText: remove.text,
+        });
+      } else if (add) {
+        rows.push({
+          type: "add",
+          newNum: add.newNum,
+          newText: add.text,
+        });
+      }
+    }
+  }
+
+  return rows;
+}
+
+function isPrDiffChangeRow(row: PrDiffSideRow): boolean {
+  return row.type !== "context";
+}
+
+function countSideBySideStats(rows: PrDiffSideRow[]): { add: number; remove: number } {
+  return rows.reduce(
+    (totals, row) => {
+      if (row.type === "add") totals.add += 1;
+      if (row.type === "remove") totals.remove += 1;
+      if (row.type === "change") {
+        totals.add += 1;
+        totals.remove += 1;
+      }
+      return totals;
+    },
+    { add: 0, remove: 0 },
+  );
+}
+
+function buildCollapsedDiffDisplay(
+  rows: PrDiffSideRow[],
+  gapKeyPrefix: string,
+  expandedGaps: Set<string>,
+): PrDiffDisplayItem[] {
+  if (rows.length === 0) return [];
+
+  const changeIndices = rows
+    .map((row, index) => (isPrDiffChangeRow(row) ? index : -1))
+    .filter((index) => index >= 0);
+
+  if (changeIndices.length === 0) {
+    return rows.map((row) => ({ kind: "row", row }));
+  }
+
+  const hunks: Array<{ start: number; end: number }> = [];
+  for (const changeIndex of changeIndices) {
+    const start = Math.max(0, changeIndex - PR_DIFF_CONTEXT_LINES);
+    const end = Math.min(rows.length - 1, changeIndex + PR_DIFF_CONTEXT_LINES);
+    const previous = hunks[hunks.length - 1];
+    if (previous && start <= previous.end + 1) {
+      previous.end = Math.max(previous.end, end);
+    } else {
+      hunks.push({ start, end });
+    }
+  }
+
+  const display: PrDiffDisplayItem[] = [];
+  let cursor = 0;
+
+  for (const hunk of hunks) {
+    if (cursor < hunk.start) {
+      const gapKey = `${gapKeyPrefix}:${cursor}-${hunk.start}`;
+      const hiddenCount = hunk.start - cursor;
+      if (expandedGaps.has(gapKey)) {
+        for (let index = cursor; index < hunk.start; index += 1) {
+          display.push({ kind: "row", row: rows[index]! });
+        }
+      } else {
+        display.push({ kind: "gap", hiddenCount, gapKey });
+      }
+    }
+
+    for (let index = hunk.start; index <= hunk.end; index += 1) {
+      display.push({ kind: "row", row: rows[index]! });
+    }
+    cursor = hunk.end + 1;
+  }
+
+  if (cursor < rows.length) {
+    const gapKey = `${gapKeyPrefix}:${cursor}-${rows.length}`;
+    const hiddenCount = rows.length - cursor;
+    if (expandedGaps.has(gapKey)) {
+      for (let index = cursor; index < rows.length; index += 1) {
+        display.push({ kind: "row", row: rows[index]! });
+      }
+    } else {
+      display.push({ kind: "gap", hiddenCount, gapKey });
+    }
+  }
+
+  return display;
+}
+
+function renderPrDiffCell(
+  side: "old" | "new",
+  row: PrDiffSideRow,
+): { className: string; num: string; html: string; empty: boolean } {
+  const isOld = side === "old";
+  const text = isOld ? row.oldText : row.newText;
+  const num = isOld ? row.oldNum : row.newNum;
+  const empty = text === undefined;
+
+  let className = "pr-diff-line";
+  if (empty) {
+    className += " pr-diff-line-empty";
+  } else if (row.type === "remove" && isOld) {
+    className += " pr-diff-line-remove";
+  } else if (row.type === "add" && !isOld) {
+    className += " pr-diff-line-add";
+  } else if (row.type === "change") {
+    className += isOld ? " pr-diff-line-remove" : " pr-diff-line-add";
+  }
+
+  const html = empty ? " " : highlightTs(text!) || escapeHtml(text || " ");
+  return { className, num: num ? String(num) : "", html, empty };
+}
+
+function createPrDiffLineRow(side: "old" | "new", row: PrDiffSideRow): HTMLElement {
+  const cell = renderPrDiffCell(side, row);
+  const lineEl = document.createElement("div");
+  lineEl.className = cell.className;
+
+  const numEl = document.createElement("span");
+  numEl.className = "pr-diff-line-num";
+  numEl.textContent = cell.num;
+
+  const contentEl = document.createElement("div");
+  contentEl.className = "pr-diff-line-content";
+
+  const textEl = document.createElement("code");
+  textEl.className = "pr-diff-line-text";
+  if (cell.empty) {
+    textEl.textContent = " ";
+  } else {
+    textEl.innerHTML = cell.html;
+  }
+
+  contentEl.appendChild(textEl);
+  lineEl.append(numEl, contentEl);
+  return lineEl;
+}
+
+function createPrDiffGapRow(
+  hiddenCount: number,
+  gapKey: string,
+  container: HTMLElement,
+  file: PrDiffFile,
+): HTMLElement {
+  const gapRow = document.createElement("div");
+  gapRow.className = "pr-diff-gap-row";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = `Expand ${hiddenCount} unchanged line${hiddenCount === 1 ? "" : "s"}`;
+  button.onclick = () => {
+    prDiffExpandedGaps.add(gapKey);
+    renderPrDiffSideBySide(container, file);
+  };
+  gapRow.appendChild(button);
+  return gapRow;
+}
+
+function createPrDiffGapSpacer(): HTMLElement {
+  const gapRow = document.createElement("div");
+  gapRow.className = "pr-diff-gap-row pr-diff-gap-spacer";
+  gapRow.setAttribute("aria-hidden", "true");
+  return gapRow;
+}
+
+let prDiffScrollSyncLock = false;
+
+function bindPrDiffScrollSync(leftScroll: HTMLElement, rightScroll: HTMLElement) {
+  const syncScrollTop = (source: HTMLElement, target: HTMLElement) => {
+    if (prDiffScrollSyncLock) return;
+    prDiffScrollSyncLock = true;
+    target.scrollTop = source.scrollTop;
+    prDiffScrollSyncLock = false;
+  };
+
+  leftScroll.addEventListener("scroll", () => syncScrollTop(leftScroll, rightScroll), { passive: true });
+  rightScroll.addEventListener("scroll", () => syncScrollTop(rightScroll, leftScroll), { passive: true });
+}
+
+function renderPrDiffSideBySide(container: HTMLElement, file: PrDiffFile) {
+  container.replaceChildren();
+  const rows = buildSideBySideRows(file);
+  if (rows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "pr-diff-empty";
+    empty.textContent = "No line changes in this file.";
+    container.appendChild(empty);
+    return;
+  }
+
+  const split = document.createElement("div");
+  split.className = "pr-diff-split";
+
+  const labels = document.createElement("div");
+  labels.className = "pr-diff-split-labels";
+  labels.innerHTML = "<span>Original</span><span>Modified</span>";
+
+  const columns = document.createElement("div");
+  columns.className = "pr-diff-split-columns";
+
+  const oldColumn = document.createElement("div");
+  oldColumn.className = "pr-diff-column pr-diff-column-old";
+  const oldScroll = document.createElement("div");
+  oldScroll.className = "pr-diff-column-scroll";
+
+  const newColumn = document.createElement("div");
+  newColumn.className = "pr-diff-column pr-diff-column-new";
+  const newScroll = document.createElement("div");
+  newScroll.className = "pr-diff-column-scroll";
+
+  const display = buildCollapsedDiffDisplay(rows, file.path, prDiffExpandedGaps);
+  for (const item of display) {
+    if (item.kind === "gap") {
+      oldScroll.appendChild(createPrDiffGapRow(item.hiddenCount, item.gapKey, container, file));
+      newScroll.appendChild(createPrDiffGapSpacer());
+      continue;
+    }
+
+    oldScroll.appendChild(createPrDiffLineRow("old", item.row));
+    newScroll.appendChild(createPrDiffLineRow("new", item.row));
+  }
+
+  oldColumn.appendChild(oldScroll);
+  newColumn.appendChild(newScroll);
+  columns.append(oldColumn, newColumn);
+  split.append(labels, columns);
+  container.appendChild(split);
+  bindPrDiffScrollSync(oldScroll, newScroll);
+}
+
+function syncPrDiffSidebarExpanded() {
+  const label = prDiffSidebarExpanded ? "Hide changed files" : "Show changed files";
+  const icon = prDiffSidebarExpanded ? PREVIEW_ICON_CHEVRON_LEFT : PREVIEW_ICON_CHEVRON_RIGHT;
+  prDiffWorkbenchEl.classList.toggle("is-sidebar-collapsed", !prDiffSidebarExpanded);
+  togglePrDiffSidebarBtn.title = label;
+  togglePrDiffSidebarBtn.setAttribute("aria-label", label);
+  togglePrDiffSidebarBtn.setAttribute("aria-expanded", String(prDiffSidebarExpanded));
+  mountPreviewIcon(togglePrDiffSidebarBtn, icon);
+}
+
+function togglePrDiffSidebar() {
+  prDiffSidebarExpanded = !prDiffSidebarExpanded;
+  syncPrDiffSidebarExpanded();
+}
+
+function clearPrModalError() {
+  prModalErrorEl.textContent = "";
+  prModalErrorEl.classList.add("hidden");
+}
+
+function resetPrModalPresentation() {
+  prModalOpenedUrl = null;
+  prModalSuccessEl.classList.add("hidden");
+  prModalFormEl.classList.remove("hidden");
+  confirmCreatePrBtn.textContent = confirmCreatePrBtn.dataset.label ?? "Open pull request";
+  cancelCreatePrBtn.textContent = "Cancel";
+}
+
+function showPrModalSuccess(prUrl: string) {
+  prModalOpenedUrl = prUrl;
+  clearPrModalError();
+  prModalFormEl.classList.add("hidden");
+  prModalSuccessEl.classList.remove("hidden");
+  prModalSuccessLinkEl.textContent = prUrl;
+  confirmCreatePrBtn.classList.remove("is-loading");
+  confirmCreatePrBtn.removeAttribute("aria-busy");
+  confirmCreatePrBtn.disabled = false;
+  confirmCreatePrBtn.textContent = "View PR";
+  cancelCreatePrBtn.textContent = "Close";
+}
+
+function handlePullRequestOpened(prUrl: string) {
+  currentJobStatus = "pr_opened";
+  currentJobPrUrl = prUrl;
+  setConfirmPrLoading(false);
+  showPrModalSuccess(prUrl);
+  syncCreatePrButtonState();
+  statusEl.textContent = `Pull request opened: ${prUrl}`;
+}
+
+function showPrModalError(message: string) {
+  prModalErrorEl.textContent = message;
+  prModalErrorEl.classList.remove("hidden");
+}
+
+function renderPrDiffView() {
+  const files = collectPrDiffFiles();
+  const fileCount = files.length;
+  const lineStats = files.reduce(
+    (totals, file) => {
+      const stats = countSideBySideStats(buildSideBySideRows(file));
+      totals.add += stats.add;
+      totals.remove += stats.remove;
+      return totals;
+    },
+    { add: 0, remove: 0 },
+  );
+
+  if (fileCount === 0) {
+    selectedPrDiffPath = null;
+    prDiffSummaryEl.textContent = "No changes to include in this pull request.";
+    prDiffFileTreeEl.innerHTML = "";
+    prDiffPathEl.textContent = "No changed files";
+    prDiffContentEl.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "pr-diff-empty";
+    empty.textContent =
+      "Edit the generated code or run an update to produce changes before opening a PR.";
+    prDiffContentEl.appendChild(empty);
+    return;
+  }
+
+  prDiffSummaryEl.textContent = `${fileCount} file${fileCount === 1 ? "" : "s"} · +${lineStats.add} −${lineStats.remove}`;
+
+  if (!selectedPrDiffPath || !files.some((file) => file.path === selectedPrDiffPath)) {
+    selectedPrDiffPath = files[0]!.path;
+  }
+
+  prDiffFileTreeEl.innerHTML = "";
+  for (const file of files) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = file.path === selectedPrDiffPath ? "active" : "";
+    button.title = file.path;
+    const badge = file.action === "create" ? "create" : "update";
+    const badgeLabel = file.action === "create" ? "n" : "m";
+    button.innerHTML = `<span class="file-badge-wrapper"><span class="file-badge ${badge}">${badgeLabel}</span></span><span class="file-name">${escapeHtml(basename(file.path))}</span>`;
+    button.onclick = () => {
+      selectedPrDiffPath = file.path;
+      renderPrDiffView();
+    };
+    item.appendChild(button);
+    prDiffFileTreeEl.appendChild(item);
+  }
+
+  const selected = files.find((file) => file.path === selectedPrDiffPath) ?? files[0]!;
+  selectedPrDiffPath = selected.path;
+  prDiffPathEl.textContent = selected.path;
+  renderPrDiffSideBySide(prDiffContentEl, selected);
+}
+
+function syncPrModalState() {
+  const modalOpen = !prModalEl.classList.contains("hidden");
+  if (!modalOpen) return;
+
+  if (prModalOpenedUrl) {
+    confirmCreatePrBtn.disabled = false;
+    return;
+  }
+
+  const hasDiffs = collectPrDiffFiles().length > 0;
+  const confirmBusy = confirmCreatePrBtn.classList.contains("is-loading");
+  confirmCreatePrBtn.disabled =
+    confirmBusy ||
+    loading ||
+    !canOpenPullRequest() ||
+    !(prTargetBranchEl.value ?? "").trim() ||
+    !hasDiffs;
+}
+
+function showPrModal() {
+  resetPrModalPresentation();
+  clearPrModalError();
+  fillPrTargetBranchSelect(cachedBranchNames);
+  prDiffExpandedGaps.clear();
+  syncPrDiffSidebarExpanded();
+  renderPrDiffView();
+  prModalEl.classList.remove("hidden");
+  prModalEl.setAttribute("aria-hidden", "false");
+  syncPrModalState();
+}
+
+function openCreatePrModal() {
+  if (cachedBranchNames.length === 0) {
+    beginLoading(createPrBtn);
+    parent.postMessage({ pluginMessage: { type: "load-branches", apiBase } }, "*");
+    pendingPrModalOpen = true;
+    return;
+  }
+
+  showPrModal();
+}
+
+function closeCreatePrModal() {
+  prModalEl.classList.add("hidden");
+  prModalEl.setAttribute("aria-hidden", "true");
+  resetPrModalPresentation();
+  clearPrModalError();
+  confirmCreatePrBtn.classList.remove("is-loading");
+  confirmCreatePrBtn.removeAttribute("aria-busy");
+  syncCreatePrButtonState();
+  syncPrModalState();
+}
+
+function setConfirmPrLoading(active: boolean) {
+  if (active) {
+    confirmCreatePrBtn.disabled = true;
+    confirmCreatePrBtn.classList.add("is-loading");
+    confirmCreatePrBtn.setAttribute("aria-busy", "true");
+    confirmCreatePrBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
+    return;
+  }
+
+  confirmCreatePrBtn.classList.remove("is-loading");
+  confirmCreatePrBtn.removeAttribute("aria-busy");
+  confirmCreatePrBtn.textContent = confirmCreatePrBtn.dataset.label ?? "Open pull request";
+  syncPrModalState();
+}
+
+function submitCreatePullRequest() {
+  if (confirmCreatePrBtn.disabled) return;
+  if (!currentBuildPreview || !canOpenPullRequest()) return;
+  flushCurrentEdit();
+  setConfirmPrLoading(true);
+
+  const pluginMessage: {
+    type: "create-pull-request";
+    apiBase: string;
+    targetBranch: string;
+    componentName: string;
+    patches: Array<{ path: string; action: "create" | "update"; content: string }>;
+    previewFileOverrides?: ReturnType<typeof collectPreviewFileOverrides>;
+    jobId?: string;
+  } = {
+    type: "create-pull-request",
+    apiBase,
+    targetBranch: prTargetBranchEl.value,
+    componentName: currentBuildPreview.componentName,
+    patches: collectPrDiffPatches(),
+    previewFileOverrides: collectPreviewFileOverrides(),
+  };
+
+  if (currentPreviewJobId && currentJobStatus === "validated") {
+    pluginMessage.jobId = currentPreviewJobId;
+  }
+
+  parent.postMessage({ pluginMessage }, "*");
+}
+
+
 
 function buildPreviewUrl(jobId: string): string {
   return `${apiBase}/jobs/${jobId}/preview`;
@@ -463,6 +1235,19 @@ function requestExistingPreviewForBundle(
   );
 }
 
+function syncPreviewStoryNotice(preview: BuildPreview | null): void {
+  if (!preview?.storyMissing) {
+    buildPreviewStoryNoticeEl.classList.add("hidden");
+    buildPreviewStoryNoticeEl.textContent = "";
+    return;
+  }
+
+  buildPreviewStoryNoticeEl.classList.remove("hidden");
+  buildPreviewStoryNoticeEl.textContent =
+    "No Storybook story found — preview uses component fallback and may differ from Storybook.";
+  buildPreviewFormatEl.textContent = "Component fallback (no story)";
+}
+
 function syncPreviewVisualState(): void {
   const waiting = Boolean(currentBuildPreview) && !currentPreviewUrl;
   if (waiting) {
@@ -493,6 +1278,7 @@ function prepareExistingPreview(
   const preview: BuildPreview = {
     componentName: bundle.componentName,
     storyFormat: storyFile ? "csf3" : "none",
+    storyMissing: !storyFile,
     storyPath: storyFile?.path,
     storyContent: storyFile?.content,
     componentPath: componentFile?.path,
@@ -511,12 +1297,16 @@ function prepareExistingPreview(
   editedFiles.clear();
   currentBuildPreview = preview;
   currentPreviewJobId = null;
+  currentJobStatus = null;
+  currentJobPrUrl = null;
   currentPreviewUrl = null;
+  setRepoBaselineFromBundle(bundle);
   selectedPreviewFilePath = null;
   selectedPreviewFileContent = "";
   clearPreviewActionLogs();
   refreshCodeExplorers();
   renderPreviewControls(preview);
+  syncPreviewStoryNotice(preview);
 
   buildPreviewSection.classList.remove("hidden");
   buildPreviewCardEl.classList.remove("hidden");
@@ -1341,9 +2131,14 @@ function clearValidatedBuildState() {
 function resetPreviewForSelectionChange() {
   hideBuildProgress();
   clearPreviewReadyTimer();
+  clearCorrectionStream();
+  closeCreatePrModal();
   previewHarnessReady = false;
   currentPreviewUrl = null;
   currentPreviewJobId = null;
+  currentJobStatus = null;
+  currentJobPrUrl = null;
+  pendingPrModalOpen = false;
   currentBuildPreview = null;
   selectedPreviewArgs = {};
   selectedPreviewFilePath = null;
@@ -1357,6 +2152,7 @@ function resetPreviewForSelectionChange() {
   previewInputGroupEl.classList.add("hidden");
   previewBooleanGroupEl.classList.add("hidden");
   buildPreviewVariantEl.classList.remove("hidden");
+  syncPreviewStoryNotice(null);
   setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, null);
   buildPreviewSection.classList.add("hidden");
   previewWorkflowEl.classList.add("hidden");
@@ -1367,6 +2163,10 @@ function resetPreviewForSelectionChange() {
 }
 
 function showBuildPreview(preview: BuildPreview, jobId: string) {
+  clearPreviewReadyTimer();
+  previewHarnessReady = false;
+  setPreviewBusy(false);
+
   // Clean up existing component preview if we're now showing a codegen result
   if (existingPreviewSessionId) {
     fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}`, {
@@ -1377,17 +2177,97 @@ function showBuildPreview(preview: BuildPreview, jobId: string) {
   editedFiles.clear();
   currentBuildPreview = preview;
   currentPreviewJobId = jobId;
+  currentJobStatus = "validated";
+  currentJobPrUrl = null;
   selectedPreviewFilePath = null;
   selectedPreviewFileContent = "";
   clearPreviewActionLogs();
   renderPreviewControls(preview);
+  syncPreviewStoryNotice(preview);
   currentPreviewUrl = buildPreviewUrl(jobId);
-  buildPreviewFormatEl.textContent = storyFormatLabel(preview.storyFormat);
+  if (!preview.storyMissing) {
+    buildPreviewFormatEl.textContent = storyFormatLabel(preview.storyFormat);
+  }
   setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, currentPreviewUrl);
   setPreviewViewMode("preview");
   refreshCodeExplorers();
   buildPreviewSection.classList.remove("hidden");
+  buildPreviewCardEl.classList.remove("hidden");
+  previewWorkflowEl.classList.remove("hidden");
+  buildPreviewFrameEl.classList.remove("hidden");
+  buildPreviewEmptyEl.classList.add("hidden");
   syncBuildUiState();
+  syncCreatePrButtonState();
+  syncDefaultDisabled();
+}
+
+async function pushBuildPreviewToExistingSession(preview: BuildPreview): Promise<void> {
+  if (!existingPreviewSessionId) return;
+  const files = getPreviewFiles(preview).filter(
+    (file) => file.path?.trim() && file.content !== undefined,
+  );
+  await Promise.all(
+    files.map((file) =>
+      fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}/files`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: file.path, content: file.content }),
+      }),
+    ),
+  );
+}
+
+async function applyValidatedJobPreview(preview: BuildPreview, jobId: string): Promise<void> {
+  clearPreviewReadyTimer();
+  setPreviewBusy(false);
+
+  editedFiles.clear();
+  currentBuildPreview = preview;
+  currentPreviewJobId = jobId;
+  currentJobStatus = "validated";
+  currentJobPrUrl = null;
+  selectedPreviewFilePath = null;
+  selectedPreviewFileContent = "";
+  clearPreviewActionLogs();
+  renderPreviewControls(preview);
+  syncPreviewStoryNotice(preview);
+  refreshCodeExplorers();
+
+  buildPreviewSection.classList.remove("hidden");
+  buildPreviewCardEl.classList.remove("hidden");
+  previewWorkflowEl.classList.remove("hidden");
+
+  const keepExistingPreview =
+    Boolean(existingPreviewSessionId) &&
+    Boolean(currentPreviewUrl?.includes("/preview/existing/"));
+
+  if (keepExistingPreview) {
+    try {
+      await pushBuildPreviewToExistingSession(preview);
+    } catch {
+      /* fall through to job preview */
+    }
+    if (!preview.storyMissing) {
+      buildPreviewFormatEl.textContent = storyFormatLabel(preview.storyFormat);
+    } else {
+      buildPreviewFormatEl.textContent = "Component fallback (no story)";
+    }
+    const reloadUrl = withPreviewReloadToken(
+      currentPreviewUrl!,
+      preview.componentName,
+    );
+    currentPreviewUrl = reloadUrl;
+    reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
+    buildPreviewFrameEl.classList.remove("hidden");
+    buildPreviewEmptyEl.classList.add("hidden");
+    setPreviewViewMode("preview");
+  } else {
+    showBuildPreview(preview, jobId);
+    return;
+  }
+
+  syncBuildUiState();
+  syncCreatePrButtonState();
   syncDefaultDisabled();
 }
 
@@ -1403,6 +2283,9 @@ function hideBuildPreview(resetWorkflow = true) {
   editedFiles.clear();
   currentBuildPreview = null;
   currentPreviewJobId = null;
+  currentJobStatus = null;
+  currentJobPrUrl = null;
+  repoBaselineContent.clear();
   selectedPreviewArgs = {};
   selectedPreviewFilePath = null;
   selectedPreviewFileContent = "";
@@ -1925,6 +2808,7 @@ function missingBitbucketFields(): string | null {
 
 function fillBranchSelects(refs: Array<{ name: string }>) {
   const names = refs.map((r) => r.name).sort();
+  cachedBranchNames = [...names];
   const html = names.map((n) => `<option value="${n}">${n}</option>`).join("");
   baseBranchEl.innerHTML = html;
   prTargetEl.innerHTML = html;
@@ -1938,6 +2822,12 @@ function fillBranchSelects(refs: Array<{ name: string }>) {
   if (preferred) {
     baseBranchEl.value = preferred;
     prTargetEl.value = preferred;
+  }
+
+  if (pendingPrModalOpen) {
+    pendingPrModalOpen = false;
+    endLoading();
+    showPrModal();
   }
 }
 
@@ -2122,6 +3012,7 @@ function showConnected(data: {
   mainScreen.classList.remove("hidden");
   connectedBadgeText.textContent = formatRepoName(data.connection.repoUrl);
   fillSetupForm(data.connection);
+  savedDefaultPrTarget = data.connection.vcs.defaultPrTarget || setupPrTargetEl.value.trim() || "main";
   setupSaved = Boolean(data.connection.setupCorrectedAt);
   editingSetup = false;
   syncMainScreenLayout({
@@ -2260,7 +3151,46 @@ pushModelEl.onchange = () => {
 };
 
 pushBtn.onclick = () => {
+  if (pushBtn.disabled) return;
   startBuild();
+};
+
+createPrBtn.onclick = () => {
+  if (currentJobPrUrl) {
+    openExternalUrl(currentJobPrUrl);
+    return;
+  }
+  openCreatePrModal();
+};
+
+cancelCreatePrBtn.onclick = () => {
+  closeCreatePrModal();
+};
+
+togglePrDiffSidebarBtn.onclick = () => {
+  togglePrDiffSidebar();
+};
+
+confirmCreatePrBtn.onclick = () => {
+  if (prModalOpenedUrl) {
+    openExternalUrl(prModalOpenedUrl);
+    return;
+  }
+  submitCreatePullRequest();
+};
+
+prModalSuccessLinkEl.onclick = () => {
+  if (prModalOpenedUrl) {
+    openExternalUrl(prModalOpenedUrl);
+  }
+};
+
+prModalBackdropEl.onclick = () => {
+  closeCreatePrModal();
+};
+
+prTargetBranchEl.onchange = () => {
+  syncPrModalState();
 };
 
 expandPreviewBtn.onclick = () => {
@@ -2501,6 +3431,7 @@ window.onmessage = (event: MessageEvent) => {
     if (mode === "update" && msg.matched && msg.bundleId && msg.bundle) {
       componentWorkflowMode = "update";
       currentResolvedBundle = msg.bundle as ResolvedBundleSummary;
+      setRepoBaselineFromBundle(currentResolvedBundle);
       renderResolvedBundle(currentResolvedBundle);
       prepareExistingPreview(currentResolvedBundle, selId);
       showBuildProgress(currentResolvedBundle.componentName);
@@ -2508,6 +3439,7 @@ window.onmessage = (event: MessageEvent) => {
     } else {
       componentWorkflowMode = "create";
       currentResolvedBundle = null;
+      setRepoBaselineFromBundle(null);
       matchSectionEl.classList.add("hidden");
       if (msg.reason && typeof msg.reason === "string") {
         statusEl.textContent = msg.reason;
@@ -2633,6 +3565,17 @@ window.onmessage = (event: MessageEvent) => {
     }
   }
 
+  if (msg.type === "pull-request-opened") {
+    const prUrl = typeof msg.prUrl === "string" ? msg.prUrl : null;
+    if (prUrl) {
+      handlePullRequestOpened(prUrl);
+    } else {
+      setConfirmPrLoading(false);
+      showPrModalError("Pull request opened but no URL was returned.");
+    }
+    return;
+  }
+
   if (msg.type === "job-update") {
     const job = msg.job as {
       id: string;
@@ -2654,9 +3597,14 @@ window.onmessage = (event: MessageEvent) => {
 
     if (job.status === "validated" && job.buildPreview) {
       lastValidatedSelectionId = currentSelectionId;
-      setPreviewBusy(false);
-      if (!existingPreviewSessionId) {
-        showBuildPreview(job.buildPreview, job.id);
+      void applyValidatedJobPreview(job.buildPreview, job.id);
+    } else if (job.status === "pr_opened") {
+      if (job.prUrl) {
+        handlePullRequestOpened(job.prUrl);
+      } else {
+        currentJobStatus = "pr_opened";
+        setConfirmPrLoading(false);
+        syncCreatePrButtonState();
       }
     } else if (job.status === "failed" || job.status === "needs_manual_fix") {
       if (!preservedRun) {
@@ -2677,7 +3625,14 @@ window.onmessage = (event: MessageEvent) => {
 
   if (msg.type === "error") {
     endLoading();
-    statusEl.textContent = `Error: ${msg.message}`;
+    setConfirmPrLoading(false);
+    pendingPrModalOpen = false;
+    const message = String(msg.message ?? "Unknown error");
+    if (!prModalEl.classList.contains("hidden")) {
+      showPrModalError(message);
+    } else {
+      statusEl.textContent = `Error: ${message}`;
+    }
   }
 };
 

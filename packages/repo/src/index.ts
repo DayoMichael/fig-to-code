@@ -41,5 +41,9 @@ export {
   writeSyncConfig,
 } from "./onboard.js";
 export type { OnboardLocalOptions, OnboardRemoteOptions, OnboardResult } from "./onboard.js";
-export { resolveComponentBundle } from "./resolve-component.js";
+export {
+  resolveComponentBundle,
+  buildStoryFileCandidates,
+  canonicalComponentNameFromPath,
+} from "./resolve-component.js";
 export type { ResolveComponentInput, ResolveFileReader } from "./resolve-component.js";

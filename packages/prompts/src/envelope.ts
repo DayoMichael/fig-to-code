@@ -137,6 +137,9 @@ PATCH RULES
 - Use action "update" for paths that exist in existing_files; "create" only for missing required files (e.g. a new story when none exists).
 - Do not invent import paths outside registry_hints. Prefer relative imports already present in existing_files.
 - Update .stories.tsx (and tests if present) only when the component change requires it.
+- When no story exists in existing_files and conventions.storyFormat is not "none", create the story at the team's story path (see expectedFiles in job_facts when present).
+- When no test exists and conventions.testFramework is not "none", create the test file.
+- When a barrel or package index export is missing, add it (package index uses /* fig2code:append-export */ marker for append-only updates).
 - Copy Tailwind classes from pruned_spec exactly — no arbitrary text-[14px] or raw hex when classes exist.
 - Do NOT emit Tailwind arbitrary CSS-var utilities like \`bg-[var(--token)]\` or \`hover:bg-[var(--token)]\`. Use semantic token utility classes from pruned_spec / registry_hints (e.g. \`bg-k-color-button-bg-filled\`, \`hover:bg-k-color-button-bg-filled-hovered\`).
 - JSX style prop must be an object, never a CSS string.
@@ -181,6 +184,11 @@ GOOD:
 Never emit the token sequence \`}{\` in a function parameter list under any circumstances.
 Export the React component in PascalCase as the FIRST PascalCase declaration in the file. Utility consts (variants, styles, tokens) must use lowerCamelCase, never PascalCase.
 Never export the component as a plain object (\`export const Button = { Root, Icon }\`); keep \`Button\` as a function/forwardRef and attach sub-components afterwards (\`Button.Icon = ...\`).
+
+When job_facts.conventions.storyFormat is csf3 or csf2, ALWAYS emit a Storybook story file at job_facts.expectedFiles.storyPath (create) with meta.component set to the component under test and preview-safe Default args.
+When job_facts.conventions.testFramework is vitest or jest, ALWAYS emit a test file at job_facts.expectedFiles.testPath (create).
+When job_facts.expectedFiles.barrelPath is set, emit that index.ts barrel exporting the component and its props type.
+When job_facts.expectedFiles.packageIndexPath is set, emit an update patch for that file using the fig2code append-export marker exactly as in job_facts.expectedFiles.packageIndexPatchExample.
 
 Design tokens: pruned_spec styles, typography, and layout.typography already contain resolved Tailwind classes from the team repo (e.g. text-text-primary, text-sm, font-body, bg-surface-warning).
 Copy those class strings into className exactly — do not substitute rgb/hex values, arbitrary Tailwind classes, or re-resolve token: references.

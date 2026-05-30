@@ -55,8 +55,10 @@ export class GitHostApiError extends Error {
   constructor(
     readonly status: number,
     readonly body: string,
+    readonly operation?: string,
   ) {
-    super(`Git host API error ${status}: ${body.slice(0, 500)}`);
+    const prefix = operation ? ` (${operation})` : "";
+    super(`Git host API error ${status}${prefix}: ${body.slice(0, 500)}`);
     this.name = "GitHostApiError";
   }
 }
