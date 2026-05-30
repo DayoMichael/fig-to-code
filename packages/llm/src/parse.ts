@@ -75,7 +75,67 @@ function parseJsonObject(json: string): CodegenOutput {
   }
 }
 
-export function extractCodegenJson(raw: string): string {
+/** Walk from `{` and return the matching `}` object slice, respecting JSON strings. */
+export function extractBalancedJsonObject(source: string, openBraceIndex: number): string | null {
+  if (source[openBraceIndex] !== "{") {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let index = openBraceIndex;
+
+  while (index < source.length) {
+    const char = source[index]!;
+
+    if (inString) {
+      if (char === "\\") {
+        index += 2;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(openBraceIndex, index + 1);
+      }
+    }
+
+    index += 1;
+  }
+
+  return null;
+}
+
+export function formatCodegenParseError(error: unknown, rawLength?: number): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/Unterminated string|Unterminated JSON|Unexpected end of JSON input|Expected .* in JSON/i.test(detail)) {
+    const sizeHint = rawLength ? ` (${rawLength} chars received)` : "";
+    return [
+      "The model returned invalid or truncated JSON.",
+      detail,
+      `This usually means the codegen response was cut off or had unescaped quotes/newlines inside a patch${sizeHint}.`,
+      "Try Update with Figma again; for large components, simplify the selection or ask for a smaller change.",
+    ].join(" ");
+  }
+  return detail;
+}
+
+function locateCodegenJsonCandidate(raw: string): string {
   const trimmed = raw.trim();
 
   try {
@@ -87,23 +147,48 @@ export function extractCodegenJson(raw: string): string {
 
   const fenced = JSON_FENCE_RE.exec(trimmed);
   if (fenced?.[1]) {
-    return fenced[1].trim();
+    const inner = fenced[1].trim();
+    try {
+      parseJsonObject(inner);
+      return inner;
+    } catch {
+      const start = inner.indexOf("{");
+      if (start !== -1) {
+        const balanced = extractBalancedJsonObject(inner, start);
+        if (balanced) {
+          return balanced;
+        }
+      }
+    }
   }
 
   const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start !== -1 && end > start) {
-    return trimmed.slice(start, end + 1);
+  if (start !== -1) {
+    const balanced = extractBalancedJsonObject(trimmed, start);
+    if (balanced) {
+      return balanced;
+    }
+    throw new Error(
+      `Unterminated JSON object in model output (${trimmed.length} chars received)`,
+    );
   }
 
   throw new Error("Could not locate JSON object in model output");
 }
 
+export function extractCodegenJson(raw: string): string {
+  return locateCodegenJsonCandidate(raw);
+}
+
 export function parseCodegenOutput(raw: string): CodegenOutput {
-  const json = extractCodegenJson(raw);
-  const parsed = parseJsonObject(json);
-  validateCodegenOutput(parsed);
-  return parsed;
+  try {
+    const json = locateCodegenJsonCandidate(raw);
+    const parsed = parseJsonObject(json);
+    validateCodegenOutput(parsed);
+    return parsed;
+  } catch (error) {
+    throw new Error(formatCodegenParseError(error, raw.length));
+  }
 }
 
 export function validateCodegenOutput(output: CodegenOutput): void {

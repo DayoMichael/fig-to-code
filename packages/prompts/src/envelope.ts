@@ -134,12 +134,15 @@ Rule 7 — Default story args must render the component synchronously. No router
 ============
 PATCH RULES
 ============
+- Emit ONLY changed files in "patches". Do not re-emit unchanged story, test, barrel, package index, or related files — existing_files already has them.
+- Patch "content" strings must be valid JSON: escape \`, \\, and newlines. The entire response must be one complete JSON object (never cut off mid-string).
 - Use action "update" for paths that exist in existing_files; "create" only for missing required files (e.g. a new story when none exists).
 - Do not invent import paths outside registry_hints. Prefer relative imports already present in existing_files.
-- Update .stories.tsx (and tests if present) only when the component change requires it.
+- Update .stories.tsx (and tests if present) only when the component change requires it — keep unrelated story exports and args intact.
 - When no story exists in existing_files and conventions.storyFormat is not "none", create the story at the team's story path (see expectedFiles in job_facts when present).
 - When no test exists and conventions.testFramework is not "none", create the test file.
-- When a barrel or package index export is missing, add it (package index uses /* fig2code:append-export */ marker for append-only updates).
+- NEVER rewrite packages/*/src/index.ts or any existing barrel/index.ts wholesale on component-update. Those files export many symbols — omit them unless you must ADD one export using the fig2code append-export marker exactly (see job_facts.packageIndexPatchExample when present). Never delete or replace existing export lines.
+- When a barrel or package index export is missing for a brand-new component, add it append-only (package index uses /* fig2code:append-export */ marker).
 - Copy Tailwind classes from pruned_spec exactly — no arbitrary text-[14px] or raw hex when classes exist.
 - Do NOT emit Tailwind arbitrary CSS-var utilities like \`bg-[var(--token)]\` or \`hover:bg-[var(--token)]\`. Use semantic token utility classes from pruned_spec / registry_hints (e.g. \`bg-k-color-button-bg-filled\`, \`hover:bg-k-color-button-bg-filled-hovered\`).
 - JSX style prop must be an object, never a CSS string.

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { appendExportPatchToFile, buildPackageIndexAppendPatch, ensureCodegenScaffolds, planCodegenFiles } from "./scaffold.js";
+import { appendExportPatchToFile, buildPackageIndexAppendPatch, ensureCodegenScaffolds, finalizeBarrelExportPatches, planCodegenFiles, sanitizeUpdateBarrelPatches } from "./scaffold.js";
 import type { SyncConfig } from "@fig2code/spec";
 
 const baseSyncConfig: SyncConfig = {
@@ -130,5 +130,163 @@ describe("codegen scaffolds", () => {
     assert.match(indexContent, /export \{ Button \}/);
     assert.match(indexContent, /export \{ InlineAlert, type InlineAlertProps \}/);
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("drops full package index rewrites on component-update", () => {
+    const patches = sanitizeUpdateBarrelPatches(
+      [
+        {
+          path: "packages/ui/src/components/ui/inline-alert.tsx",
+          action: "update",
+          content: "export function InlineAlert() { return null; }",
+        },
+        {
+          path: "packages/ui/src/index.ts",
+          action: "update",
+          content: "export { InlineAlert } from './components/ui/inline-alert';",
+        },
+      ],
+      {
+        intent: "component-update",
+        componentName: "InlineAlert",
+        syncConfig: kudaSyncConfig,
+        existingFiles: {
+          componentName: "InlineAlert",
+          files: [
+            {
+              path: "packages/ui/src/components/ui/inline-alert.tsx",
+              role: "component",
+              content: "export function InlineAlert() { return null; }",
+            },
+            {
+              path: "packages/ui/src/index.ts",
+              role: "related",
+              content:
+                "export { Button } from './components/ui/button';\nexport { Avatar } from './components/ui/avatar';\n",
+            },
+          ],
+        },
+      },
+    );
+
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0]?.path, "packages/ui/src/components/ui/inline-alert.tsx");
+  });
+
+  it("drops append index patch when export already exists", () => {
+    const appendPatch = buildPackageIndexAppendPatch(
+      planCodegenFiles(
+        kudaSyncConfig,
+        "InlineAlert",
+        "packages/ui/src/components/ui/inline-alert.tsx",
+      ),
+    );
+    const patches = sanitizeUpdateBarrelPatches(
+      [{ path: "packages/ui/src/index.ts", action: "update", content: appendPatch }],
+      {
+        intent: "component-update",
+        componentName: "InlineAlert",
+        syncConfig: kudaSyncConfig,
+        existingFiles: {
+          componentName: "InlineAlert",
+          files: [
+            {
+              path: "packages/ui/src/index.ts",
+              role: "related",
+              content:
+                "export { Button } from './components/ui/button';\nexport { InlineAlert, type InlineAlertProps } from './components/ui/inline-alert';\n",
+            },
+          ],
+        },
+      },
+    );
+
+    assert.equal(patches.length, 0);
+  });
+
+  it("skips package index scaffold when export already exists in bundle", () => {
+    const patches = ensureCodegenScaffolds(
+      [
+        {
+          path: "packages/ui/src/components/ui/inline-alert.tsx",
+          action: "update",
+          content: "export function InlineAlert() { return null; }",
+        },
+      ],
+      kudaSyncConfig,
+      { name: "InlineAlert", kind: "component" },
+      {
+        files: [
+          {
+            path: "packages/ui/src/index.ts",
+            role: "related",
+            content:
+              "export { Button } from './components/ui/button';\nexport { InlineAlert, type InlineAlertProps } from './components/ui/inline-alert';\n",
+          },
+        ],
+      },
+    );
+
+    assert.ok(!patches.some((patch) => patch.path === "packages/ui/src/index.ts"));
+  });
+
+  it("expands append index patches into full file content", () => {
+    const appendPatch = buildPackageIndexAppendPatch(
+      planCodegenFiles(
+        kudaSyncConfig,
+        "InlineAlert",
+        "packages/ui/src/components/ui/inline-alert.tsx",
+      ),
+    );
+    const patches = finalizeBarrelExportPatches(
+      [{ path: "packages/ui/src/index.ts", action: "update", content: appendPatch }],
+      {
+        componentName: "InlineAlert",
+        existingFiles: {
+          componentName: "InlineAlert",
+          files: [
+            {
+              path: "packages/ui/src/index.ts",
+              role: "related",
+              content: "export { Button } from './components/ui/button';\n",
+            },
+          ],
+        },
+      },
+    );
+
+    assert.equal(patches.length, 1);
+    assert.doesNotMatch(patches[0]?.content ?? "", /fig2code:append-export/);
+    assert.match(patches[0]?.content ?? "", /export \{ Button \}/);
+    assert.match(patches[0]?.content ?? "", /export \{ InlineAlert, type InlineAlertProps \}/);
+  });
+
+  it("drops append index patches when export already exists", () => {
+    const appendPatch = buildPackageIndexAppendPatch(
+      planCodegenFiles(
+        kudaSyncConfig,
+        "InlineAlert",
+        "packages/ui/src/components/ui/inline-alert.tsx",
+      ),
+    );
+    const patches = finalizeBarrelExportPatches(
+      [{ path: "packages/ui/src/index.ts", action: "update", content: appendPatch }],
+      {
+        componentName: "InlineAlert",
+        existingFiles: {
+          componentName: "InlineAlert",
+          files: [
+            {
+              path: "packages/ui/src/index.ts",
+              role: "related",
+              content:
+                "export { InlineAlert, type InlineAlertProps } from './components/ui/inline-alert';\n",
+            },
+          ],
+        },
+      },
+    );
+
+    assert.equal(patches.length, 0);
   });
 });

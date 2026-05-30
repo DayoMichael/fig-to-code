@@ -18,6 +18,6 @@ export function formatGitHostApiError(
     return `Authentication failed (${error.status}). Check your token and permissions.`;
   }
 
-  const detail = error.body.trim();
+  const detail = (error.body ?? "").trim();
   return detail ? `${error.message} ${detail}` : error.message;
 }

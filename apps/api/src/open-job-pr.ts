@@ -1,5 +1,10 @@
 import type { FilePatch, JobBuildPreview } from "@fig2code/spec";
-import { createGitHostProvider } from "@fig2code/git-host";
+import {
+  isAppendExportPatch,
+  mergeAppendExportIntoContent,
+  packageIndexExportExists,
+} from "@fig2code/codegen";
+import { createGitHostProvider, type GitHostProvider } from "@fig2code/git-host";
 import type { StoredJob } from "./job-store.js";
 
 export interface OpenJobPullRequestInput {
@@ -15,8 +20,8 @@ export interface OpenJobPullRequestResult {
   headBranch: string;
 }
 
-function slugify(value: string): string {
-  return value
+function slugify(value: string | undefined): string {
+  return (value ?? "")
     .trim()
     .replace(/[^a-zA-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
@@ -56,7 +61,7 @@ export function buildPatchesFromJobPreview(
   }
 
   return [...patches.values()].filter(
-    (patch) => patch.action === "delete" || Boolean(patch.content?.trim()),
+    (patch) => patch.action === "delete" || Boolean((patch.content ?? "").trim()),
   );
 }
 
@@ -68,7 +73,9 @@ export function resolvePullRequestPatches(
   },
 ): FilePatch[] {
   const clientPatches = (options.patches ?? []).filter(
-    (patch) => patch?.path?.trim() && (patch.action === "delete" || patch.content?.trim()),
+    (patch) =>
+      Boolean(patch?.path?.trim()) &&
+      (patch.action === "delete" || Boolean(patch.content?.trim())),
   );
   if (clientPatches.length > 0) {
     return clientPatches;
@@ -117,6 +124,50 @@ export function buildManualPullRequestBody(componentName: string): string {
   ].join("\n");
 }
 
+export async function resolveAppendExportPatchesForCommit(
+  patches: FilePatch[],
+  options: {
+    vcs: StoredJob["request"]["vcs"];
+    auth: { token: string; atlassianEmail?: string };
+    baseBranch: string;
+    componentName: string;
+    git?: GitHostProvider;
+  },
+): Promise<FilePatch[]> {
+  const git = options.git ?? createGitHostProvider(options.vcs.provider);
+  const resolved: FilePatch[] = [];
+
+  for (const patch of patches) {
+    if (patch.action === "delete") {
+      resolved.push(patch);
+      continue;
+    }
+    if (!patch.content?.trim()) {
+      continue;
+    }
+
+    if (!isAppendExportPatch(patch.content)) {
+      resolved.push(patch);
+      continue;
+    }
+
+    const base =
+      (await git.readFile(options.vcs, options.auth, patch.path, options.baseBranch)) ?? "";
+    if (packageIndexExportExists(base, options.componentName)) {
+      continue;
+    }
+
+    const merged = mergeAppendExportIntoContent(base, patch.content);
+    if (!merged) {
+      continue;
+    }
+
+    resolved.push({ ...patch, content: merged });
+  }
+
+  return resolved;
+}
+
 export interface OpenPullRequestFromPatchesInput {
   vcs: StoredJob["request"]["vcs"];
   auth: { token: string; atlassianEmail?: string };
@@ -139,11 +190,23 @@ export async function openPullRequestFromPatches(
   const headBranch = `fig2code/${slugify(componentName)}-${branchSuffix.slice(0, 8)}`;
   const git = createGitHostProvider(vcs.provider);
 
+  const resolvedPatches = await resolveAppendExportPatchesForCommit(patches, {
+    vcs,
+    auth,
+    baseBranch: targetBranch,
+    componentName,
+    git,
+  });
+
+  if (resolvedPatches.length === 0) {
+    throw new Error("No file changes to include in the pull request");
+  }
+
   await git.writeFiles(vcs, auth, {
     headBranch,
     baseBranch: targetBranch,
     message: `Fig2Code: ${componentName}`,
-    patches,
+    patches: resolvedPatches,
   });
 
   const pr = await git.openPullRequest({

@@ -200,4 +200,39 @@ export default meta;
       "apps/storybook/src/stories/Avatar.stories.tsx",
     );
   });
+
+  it("includes package index and monorepo test in the bundle", async () => {
+    const files: Record<string, string> = {
+      "packages/ui/src/components/ui/inline-alert.tsx":
+        "export const InlineAlert = () => null;",
+      "apps/storybook/src/stories/InlineAlert.stories.tsx":
+        "export const Default = { args: {} };",
+      "packages/ui/src/index.ts":
+        "export { Button } from './components/ui/button';\nexport { Avatar } from './components/ui/avatar';\n",
+      "packages/ui/src/__tests__/inline-alert.test.tsx":
+        "describe('InlineAlert', () => { it('renders', () => {}); });",
+    };
+
+    const bundle = await resolveComponentBundle({
+      componentName: "InlineAlert",
+      syncConfig: {
+        ...baseSyncConfig,
+        web: {
+          ...baseSyncConfig.web!,
+          componentPath: "packages/ui/src/components/ui",
+        },
+      },
+      readFile: async (path) => files[path] ?? null,
+    });
+
+    assert.ok(bundle);
+    assert.equal(
+      bundle!.files.find((file) => file.role === "related")?.path,
+      "packages/ui/src/index.ts",
+    );
+    assert.equal(
+      bundle!.files.find((file) => file.role === "test")?.path,
+      "packages/ui/src/__tests__/inline-alert.test.tsx",
+    );
+  });
 });

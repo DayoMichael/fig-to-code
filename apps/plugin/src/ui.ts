@@ -483,7 +483,8 @@ function normalizePreviewPath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
-function normalizePreviewContent(content: string): string {
+function normalizePreviewContent(content: string | null | undefined): string {
+  if (content == null) return "";
   return content.replace(/\r\n/g, "\n").trimEnd();
 }
 
@@ -491,7 +492,7 @@ function snapshotPreviewContent(preview: BuildPreview | null): Map<string, strin
   const snapshot = new Map<string, string>();
   if (!preview) return snapshot;
   for (const file of getPreviewFiles(preview)) {
-    if (file.content !== undefined) {
+    if (file.content != null) {
       snapshot.set(normalizePreviewPath(file.path), file.content);
     }
   }
@@ -560,11 +561,13 @@ function canOpenPullRequest(): boolean {
 }
 
 function collectPrDiffPatches(): Array<{ path: string; action: "create" | "update"; content: string }> {
-  return collectPrDiffFiles().map((file) => ({
-    path: file.path,
-    action: file.action === "create" ? "create" : "update",
-    content: file.newContent,
-  }));
+  return collectPrDiffFiles()
+    .filter((file) => Boolean(file.path?.trim() && file.newContent?.trim()))
+    .map((file) => ({
+      path: file.path,
+      action: file.action === "create" ? "create" : "update",
+      content: file.newContent,
+    }));
 }
 
 function syncCreatePrButtonState() {
@@ -1173,7 +1176,7 @@ function submitCreatePullRequest() {
   } = {
     type: "create-pull-request",
     apiBase,
-    targetBranch: prTargetBranchEl.value,
+    targetBranch: prTargetBranchEl.value || savedDefaultPrTarget,
     componentName: currentBuildPreview.componentName,
     patches: collectPrDiffPatches(),
     previewFileOverrides: collectPreviewFileOverrides(),
@@ -2189,6 +2192,14 @@ function showBuildPreview(preview: BuildPreview, jobId: string) {
     buildPreviewFormatEl.textContent = storyFormatLabel(preview.storyFormat);
   }
   setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, currentPreviewUrl);
+  previewReadyTimer = setTimeout(() => {
+    if (previewHarnessReady) return;
+    buildPreviewFrameEl.classList.add("hidden");
+    buildPreviewEmptyEl.classList.remove("hidden");
+    buildPreviewEmptyEl.textContent =
+      `Preview did not load for ${preview.componentName}. ` +
+      "Check that the API is running, then try Update with Figma again.";
+  }, 15000);
   setPreviewViewMode("preview");
   refreshCodeExplorers();
   buildPreviewSection.classList.remove("hidden");
@@ -2201,74 +2212,100 @@ function showBuildPreview(preview: BuildPreview, jobId: string) {
   syncDefaultDisabled();
 }
 
-async function pushBuildPreviewToExistingSession(preview: BuildPreview): Promise<void> {
-  if (!existingPreviewSessionId) return;
-  const files = getPreviewFiles(preview).filter(
-    (file) => file.path?.trim() && file.content !== undefined,
-  );
-  await Promise.all(
-    files.map((file) =>
-      fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}/files`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: file.path, content: file.content }),
-      }),
-    ),
-  );
+function enrichValidatedPreview(preview: BuildPreview): BuildPreview {
+  const files = [...(preview.files ?? [])];
+  let enriched: BuildPreview = { ...preview, files };
+
+  const componentFromBundle = currentResolvedBundle?.files.find((file) => file.role === "component");
+  const componentPath =
+    enriched.componentPath ??
+    componentFromBundle?.path ??
+    files.find((file) => file.role === "component")?.path ??
+    [...repoBaselineContent.keys()].find((path) => /\.(tsx|jsx)$/i.test(path) && !/\.stories\./i.test(path));
+  const componentContent =
+    enriched.componentContent ??
+    componentFromBundle?.content ??
+    files.find((file) => file.path === componentPath)?.content ??
+    (componentPath ? repoBaselineContent.get(normalizePreviewPath(componentPath)) : undefined);
+
+  if (componentPath && componentContent?.trim()) {
+    enriched = {
+      ...enriched,
+      componentPath,
+      componentContent,
+    };
+    const componentIndex = files.findIndex((file) => file.path === componentPath);
+    if (componentIndex >= 0) {
+      const existing = files[componentIndex]!;
+      if (!existing.content?.trim()) {
+        files[componentIndex] = {
+          ...existing,
+          content: componentContent,
+          role: existing.role ?? "component",
+          action: existing.action ?? "update",
+        };
+      }
+    } else {
+      files.push({
+        path: componentPath,
+        action: "update",
+        content: componentContent,
+        role: "component",
+      });
+    }
+  }
+
+  if (!enriched.storyMissing) {
+    return { ...enriched, files };
+  }
+
+  const storyFromBundle = currentResolvedBundle?.files.find((file) => file.role === "story");
+  const storyPath =
+    storyFromBundle?.path ??
+    enriched.storyPath ??
+    [...repoBaselineContent.keys()].find((path) => /\.stories\.(tsx|jsx|ts|js|mdx)$/i.test(path));
+  const storyContent =
+    storyFromBundle?.content ??
+    enriched.storyContent ??
+    files.find((file) => file.path === storyPath)?.content ??
+    (storyPath ? repoBaselineContent.get(normalizePreviewPath(storyPath)) : undefined);
+
+  if (!storyPath || !storyContent?.trim()) {
+    return { ...enriched, files };
+  }
+
+  const existingIndex = files.findIndex((file) => file.path === storyPath);
+  if (existingIndex >= 0) {
+    const existing = files[existingIndex]!;
+    if (!existing.content?.trim()) {
+      files[existingIndex] = {
+        ...existing,
+        content: storyContent,
+        role: existing.role ?? "story",
+        action: existing.action ?? "update",
+      };
+    }
+  } else {
+    files.push({
+      path: storyPath,
+      action: "update",
+      content: storyContent,
+      role: "story",
+    });
+  }
+
+  return {
+    ...enriched,
+    storyMissing: false,
+    storyPath,
+    storyContent,
+    files,
+  };
 }
 
 async function applyValidatedJobPreview(preview: BuildPreview, jobId: string): Promise<void> {
-  clearPreviewReadyTimer();
-  setPreviewBusy(false);
-
-  editedFiles.clear();
-  currentBuildPreview = preview;
-  currentPreviewJobId = jobId;
-  currentJobStatus = "validated";
-  currentJobPrUrl = null;
-  selectedPreviewFilePath = null;
-  selectedPreviewFileContent = "";
-  clearPreviewActionLogs();
-  renderPreviewControls(preview);
-  syncPreviewStoryNotice(preview);
-  refreshCodeExplorers();
-
-  buildPreviewSection.classList.remove("hidden");
-  buildPreviewCardEl.classList.remove("hidden");
-  previewWorkflowEl.classList.remove("hidden");
-
-  const keepExistingPreview =
-    Boolean(existingPreviewSessionId) &&
-    Boolean(currentPreviewUrl?.includes("/preview/existing/"));
-
-  if (keepExistingPreview) {
-    try {
-      await pushBuildPreviewToExistingSession(preview);
-    } catch {
-      /* fall through to job preview */
-    }
-    if (!preview.storyMissing) {
-      buildPreviewFormatEl.textContent = storyFormatLabel(preview.storyFormat);
-    } else {
-      buildPreviewFormatEl.textContent = "Component fallback (no story)";
-    }
-    const reloadUrl = withPreviewReloadToken(
-      currentPreviewUrl!,
-      preview.componentName,
-    );
-    currentPreviewUrl = reloadUrl;
-    reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
-    buildPreviewFrameEl.classList.remove("hidden");
-    buildPreviewEmptyEl.classList.add("hidden");
-    setPreviewViewMode("preview");
-  } else {
-    showBuildPreview(preview, jobId);
-    return;
-  }
-
-  syncBuildUiState();
-  syncCreatePrButtonState();
-  syncDefaultDisabled();
+  const enriched = enrichValidatedPreview(preview);
+  showBuildPreview(enriched, jobId);
 }
 
 function hideBuildPreview(resetWorkflow = true) {

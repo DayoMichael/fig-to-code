@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { extractCodegenJson, parseCodegenOutput } from "./parse.js";
+import { extractCodegenJson, extractBalancedJsonObject, parseCodegenOutput } from "./parse.js";
 
 const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "../fixtures");
 
@@ -48,5 +48,26 @@ describe("parseCodegenOutput", () => {
     assert.equal(output.patches.length, 1);
     assert.match(output.patches[0]?.content ?? "", /\\d+/);
     assert.match(output.patches[0]?.content ?? "", /C:\\Users\\dev/);
+  });
+
+  it("extractBalancedJsonObject ignores trailing prose after JSON", () => {
+    const json =
+      '{"patches":[{"path":"src/Button.tsx","action":"update","content":"function Button() { return 1; }"}],"summary":"ok"}';
+    const raw = `Here is the update:\n${json}\n\nLet me know if you need changes.`;
+    const start = raw.indexOf("{");
+    const balanced = extractBalancedJsonObject(raw, start);
+    assert.equal(balanced, json);
+    const output = parseCodegenOutput(raw);
+    assert.equal(output.patches.length, 1);
+  });
+
+  it("formatCodegenParseError explains truncated JSON", () => {
+    assert.throws(
+      () =>
+        parseCodegenOutput(
+          '{"patches":[{"path":"x.tsx","action":"update","content":"export function X() {\\n  return \\"hi',
+        ),
+      /invalid or truncated JSON/i,
+    );
   });
 });

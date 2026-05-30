@@ -71,7 +71,21 @@ export async function resolveComponentBundle(
     input.readFile,
   );
 
-  const files: ResolvedComponentFile[] = [matched, ...colocated.files];
+  const monorepoSupport = await loadMonorepoSupportFiles(
+    primary.candidate.path,
+    canonicalName,
+    input.readFile,
+  );
+
+  const seenPaths = new Set<string>();
+  const files: ResolvedComponentFile[] = [];
+  for (const file of [matched, ...colocated.files, ...monorepoSupport]) {
+    if (seenPaths.has(file.path)) {
+      continue;
+    }
+    seenPaths.add(file.path);
+    files.push(file);
+  }
 
   const match: ResolvedComponentMatch = {
     source: primary.candidate.source,
@@ -303,6 +317,59 @@ async function loadColocatedFiles(
     testPath: test?.path,
     barrelPath: barrel?.path,
   };
+}
+
+async function loadMonorepoSupportFiles(
+  componentPath: string,
+  componentName: string,
+  readFile: ResolveFileReader,
+): Promise<ResolvedComponentFile[]> {
+  const files: ResolvedComponentFile[] = [];
+  const packageIndexPath = findPackageIndexPath(componentPath);
+  if (packageIndexPath) {
+    const content = await readFile(packageIndexPath);
+    if (content?.trim()) {
+      files.push({
+        path: packageIndexPath,
+        role: "related",
+        content: truncate(content),
+      });
+    }
+  }
+
+  const monorepoTestPath = findMonorepoTestPath(componentPath, componentName);
+  if (monorepoTestPath) {
+    const content = await readFile(monorepoTestPath);
+    if (content?.trim()) {
+      files.push({
+        path: monorepoTestPath,
+        role: "test",
+        content: truncate(content),
+      });
+    }
+  }
+
+  return files;
+}
+
+function findPackageIndexPath(componentPath: string): string | undefined {
+  const marker = "packages/ui/src/";
+  const idx = componentPath.indexOf(marker);
+  if (idx === -1) {
+    return undefined;
+  }
+  return join(componentPath.slice(0, idx + marker.length), "index.ts");
+}
+
+function findMonorepoTestPath(componentPath: string, componentName: string): string | undefined {
+  if (!componentPath.includes("packages/ui/src/components/")) {
+    return undefined;
+  }
+  const kebab = componentName
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/([A-Z])([A-Z][a-z])/g, "$1-$2")
+    .toLowerCase();
+  return `packages/ui/src/__tests__/${kebab}.test.tsx`;
 }
 
 async function readFirstExisting(

@@ -51,6 +51,7 @@ export async function processJob(
       storyFormat: context.syncConfig.conventions?.storyFormat ?? "none",
       tokenCss: context.syncConfig.tokens?.sourceExcerpt,
       tokenCatalog: context.syncConfig.tokens?.catalog,
+      existingFiles: context.existingFiles,
     });
 
     return client.patchJob(payload.jobId, {

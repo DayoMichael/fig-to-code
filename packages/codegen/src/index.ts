@@ -12,6 +12,10 @@ export {
   buildTestScaffold,
   buildBarrelScaffold,
   buildPackageIndexAppendPatch,
+  isAppendExportPatch,
+  mergeAppendExportIntoContent,
+  packageIndexExportExists,
+  finalizeBarrelExportPatches,
 } from "./scaffold.js";
 export type { CodegenFilePlan } from "./scaffold.js";
 export {

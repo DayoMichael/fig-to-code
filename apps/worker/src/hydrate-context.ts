@@ -67,7 +67,7 @@ export async function hydrateCodegenContext(
         truncated: bundle.truncated ?? false,
       };
 
-      applyPreviewFileOverrides(existingFiles, payload.previewFileOverrides);
+      applyPreviewFileOverrides(existingFiles, payload.previewFileOverrides ?? []);
 
       for (const file of bundle.files) {
         if (file.role === "component" && bundle.componentName) {

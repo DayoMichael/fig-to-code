@@ -77,7 +77,7 @@ export function ensureCodegenScaffolds(
   syncConfig: SyncConfig,
   prunedSpec: PrunedSpec,
   existingFiles?: {
-    files: Array<{ path: string; role: string }>;
+    files: Array<{ path: string; role: string; content?: string }>;
   },
 ): FilePatch[] {
   const componentName = prunedSpec.name;
@@ -140,11 +140,19 @@ export function ensureCodegenScaffolds(
     paths.add(plan.barrelPath);
   }
 
+  const existingPackageIndex = existingFiles?.files.find(
+    (file) => file.path === plan.packageIndexPath,
+  );
+  const exportAlreadyListed =
+    existingPackageIndex?.content &&
+    packageIndexExportExists(existingPackageIndex.content, componentName);
+
   if (
     plan.packageIndexPath &&
     plan.packageIndexExportPath &&
     !paths.has(plan.packageIndexPath) &&
-    !hasPackageIndexPatch(next, plan.packageIndexPath)
+    !hasPackageIndexPatch(next, plan.packageIndexPath) &&
+    !exportAlreadyListed
   ) {
     next.push({
       path: plan.packageIndexPath,
@@ -159,6 +167,70 @@ export function ensureCodegenScaffolds(
 
 export function isAppendExportPatch(content: string | undefined): boolean {
   return Boolean(content?.includes(APPEND_EXPORT_MARKER));
+}
+
+export function packageIndexExportExists(content: string, componentName: string): boolean {
+  const namedExport = new RegExp(
+    `export\\s*\\{[^}]*\\b${componentName}\\b[^}]*\\}\\s*from`,
+  );
+  return namedExport.test(content);
+}
+
+/** Merge an append-export patch into existing file content. Returns undefined when no change is needed. */
+export function mergeAppendExportIntoContent(
+  existingContent: string,
+  appendPatchContent: string,
+): string | undefined {
+  const exportLine = extractAppendExportLine(appendPatchContent);
+  if (!exportLine) {
+    return undefined;
+  }
+  if (existingContent.includes(exportLine)) {
+    return undefined;
+  }
+
+  const separator =
+    existingContent.trim().length > 0 && !existingContent.endsWith("\n") ? "\n" : "";
+  return existingContent.trim().length > 0
+    ? `${existingContent}${separator}${exportLine}\n`
+    : `${exportLine}\n`;
+}
+
+/** Expand append-export patches into full file bodies (or drop when the export already exists). */
+export function finalizeBarrelExportPatches(
+  patches: FilePatch[],
+  options: {
+    existingFiles?: {
+      componentName?: string;
+      files: Array<{ path: string; role: string; content?: string }>;
+    };
+    componentName: string;
+  },
+): FilePatch[] {
+  const componentName =
+    options.existingFiles?.componentName ?? options.componentName;
+
+  return patches.flatMap((patch) => {
+    if (!patch.content || !isAppendExportPatch(patch.content)) {
+      return [patch];
+    }
+
+    const existingFile = options.existingFiles?.files.find(
+      (file) => file.path === patch.path,
+    );
+    const baseContent = existingFile?.content ?? "";
+
+    if (baseContent && packageIndexExportExists(baseContent, componentName)) {
+      return [];
+    }
+
+    const merged = mergeAppendExportIntoContent(baseContent, patch.content);
+    if (!merged) {
+      return [];
+    }
+
+    return [{ ...patch, content: merged }];
+  });
 }
 
 export function extractAppendExportLine(content: string): string {
@@ -300,7 +372,7 @@ function resolveTestPath(
   return join(dir, `${baseName}.test.tsx`);
 }
 
-function findPackageIndexPath(componentPath: string): string | undefined {
+export function findPackageIndexPath(componentPath: string): string | undefined {
   const marker = "packages/ui/src/";
   const idx = componentPath.indexOf(marker);
   if (idx === -1) {
@@ -435,6 +507,77 @@ export function buildPackageIndexAppendPatch(plan: CodegenFilePlan): string {
   return `${APPEND_EXPORT_MARKER}
 export { ${plan.componentName}, type ${plan.componentName}Props } from '${exportPath}';
 `;
+}
+
+const PACKAGE_INDEX_RE = /^packages\/[^/]+\/src\/index\.ts$/;
+
+/** Block full rewrites of package/barrel index files on component-update jobs. */
+export function sanitizeUpdateBarrelPatches(
+  patches: FilePatch[],
+  options: {
+    intent?: string;
+    existingFiles?: {
+      componentName?: string;
+      files: Array<{ path: string; role: string; content?: string }>;
+    };
+    syncConfig: SyncConfig;
+    componentName: string;
+  },
+): FilePatch[] {
+  if (options.intent !== "component-update") {
+    return patches;
+  }
+
+  const existingFiles = options.existingFiles;
+  if (!existingFiles?.files.length) {
+    return patches;
+  }
+
+  const protectedPaths = new Set<string>();
+  for (const file of existingFiles.files) {
+    if (file.role === "barrel" || file.role === "related") {
+      protectedPaths.add(file.path);
+    }
+    if (PACKAGE_INDEX_RE.test(file.path)) {
+      protectedPaths.add(file.path);
+    }
+  }
+
+  const componentPath = existingFiles.files.find((file) => file.role === "component")
+    ?.path;
+  if (componentPath) {
+    const plan = planCodegenFiles(
+      options.syncConfig,
+      existingFiles.componentName ?? options.componentName,
+      componentPath,
+    );
+    if (plan.packageIndexPath) {
+      protectedPaths.add(plan.packageIndexPath);
+    }
+    if (plan.barrelPath) {
+      protectedPaths.add(plan.barrelPath);
+    }
+  }
+
+  const componentName = existingFiles.componentName ?? options.componentName;
+
+  return patches.filter((patch) => {
+    if (!protectedPaths.has(patch.path)) {
+      return true;
+    }
+    if (patch.action === "delete") {
+      return false;
+    }
+    if (!isAppendExportPatch(patch.content)) {
+      return false;
+    }
+
+    const existing = existingFiles.files.find((file) => file.path === patch.path);
+    if (existing?.content && packageIndexExportExists(existing.content, componentName)) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function pascalToKebab(name: string): string {

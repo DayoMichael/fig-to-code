@@ -14,6 +14,8 @@ import {
   extractTailwindColorClasses,
   generatePreviewMainTsx,
   usesStorybookPreview,
+  isAppendExportPatch,
+  mergeAppendExportIntoContent,
 } from "@fig2code/codegen";
 import { storyFormatLabel } from "@fig2code/codegen";
 import type { RepoCloneCache } from "./repo-cache.js";
@@ -23,6 +25,7 @@ import {
   extendHarnessIncludeForStory,
   mergeHarnessAliases,
   isStorybookToolingPackage,
+  preparePreviewAnnotationsForHarness,
   resolveStorybookHarnessSupport,
   sanitizeStorybookHarnessDependencies,
 } from "./storybook-harness.js";
@@ -629,6 +632,30 @@ function storybookHarnessOptions(
   };
 }
 
+async function resolveStorybookHarnessOptions(
+  repoClonePath: string,
+  harnessPath: string,
+  buildPreview: JobBuildPreview,
+  previewHarness: Awaited<ReturnType<typeof resolvePreviewHarnessContext>>,
+): Promise<{ storyRepoPath?: string; previewAnnotationsPath?: string } | undefined> {
+  const base = storybookHarnessOptions(buildPreview, previewHarness.storybook);
+  if (!base?.previewAnnotationsPath) {
+    return base;
+  }
+
+  const previewAnnotationsPath = await preparePreviewAnnotationsForHarness(
+    repoClonePath,
+    harnessPath,
+    base.previewAnnotationsPath,
+    previewHarness.viteAliases,
+  );
+
+  return {
+    ...base,
+    previewAnnotationsPath,
+  };
+}
+
 function indentCss(css: string, spaces: number): string {
   const pad = " ".repeat(spaces);
   return css
@@ -1120,7 +1147,21 @@ export function createPreviewSessionManager(
         if (file.path === buildPreview.storyPath) continue;
         const fullPath = path.join(repoClonePath, file.path);
         await mkdir(path.dirname(fullPath), { recursive: true });
-        await writeFile(fullPath, sanitizeJsxStyleProps(file.content), "utf-8");
+        let contentToWrite = sanitizeJsxStyleProps(file.content);
+        if (isAppendExportPatch(file.content)) {
+          let existing = "";
+          try {
+            existing = await readFs(fullPath, "utf-8");
+          } catch {
+            existing = "";
+          }
+          const merged = mergeAppendExportIntoContent(existing, file.content);
+          if (!merged) {
+            continue;
+          }
+          contentToWrite = sanitizeJsxStyleProps(merged);
+        }
+        await writeFile(fullPath, contentToWrite, "utf-8");
         generatedFiles.push(file.path);
       }
     }
@@ -1131,9 +1172,11 @@ export function createPreviewSessionManager(
       componentRepoPath,
       buildPreview,
     );
-    const sbOptions = storybookHarnessOptions(
+    const sbOptions = await resolveStorybookHarnessOptions(
+      repoClonePath,
+      harnessPath,
       buildPreview,
-      previewHarness.storybook,
+      previewHarness,
     );
 
     const harnessFiles: Array<[string, string]> = [
@@ -1305,9 +1348,11 @@ export function createPreviewSessionManager(
       ctx.componentRepoPath,
       ctx.buildPreview,
     );
-    const sbOptions = storybookHarnessOptions(
+    const sbOptions = await resolveStorybookHarnessOptions(
+      repoClonePath,
+      harnessPath,
       ctx.buildPreview,
-      previewHarness.storybook,
+      previewHarness,
     );
     const previewTheme = await resolvePreviewTheme(
       repoClonePath,

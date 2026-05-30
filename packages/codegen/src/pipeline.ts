@@ -32,8 +32,10 @@ import {
 import {
   appendExportPatchToFile,
   ensureCodegenScaffolds,
+  finalizeBarrelExportPatches,
   isAppendExportPatch,
   planCodegenFiles,
+  sanitizeUpdateBarrelPatches,
   buildPackageIndexAppendPatch,
 } from "./scaffold.js";
 import type { CodegenChangeSummary } from "@fig2code/spec";
@@ -100,6 +102,40 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
           primaryComponentPath:
             context.existingFiles!.files.find((file) => file.role === "component")?.path,
           storyPath: context.existingFiles!.files.find((file) => file.role === "story")?.path,
+          testPath: context.existingFiles!.files.find((file) => file.role === "test")?.path,
+          barrelPath:
+            context.existingFiles!.files.find((file) => file.role === "barrel")?.path ??
+            context.existingFiles!.files.find(
+              (file) => file.role === "related" && file.path.endsWith("/index.ts"),
+            )?.path,
+          packageIndexPath: (() => {
+            const componentPath = context.existingFiles!.files.find(
+              (file) => file.role === "component",
+            )?.path;
+            return componentPath
+              ? planCodegenFiles(
+                  context.syncConfig,
+                  context.existingFiles!.componentName,
+                  componentPath,
+                ).packageIndexPath
+              : undefined;
+          })(),
+          packageIndexPatchExample: (() => {
+            const componentPath = context.existingFiles!.files.find(
+              (file) => file.role === "component",
+            )?.path;
+            if (!componentPath) {
+              return undefined;
+            }
+            const plan = planCodegenFiles(
+              context.syncConfig,
+              context.existingFiles!.componentName,
+              componentPath,
+            );
+            return plan.packageIndexPath
+              ? buildPackageIndexAppendPatch(plan)
+              : undefined;
+          })(),
           ...(context.syncConfig.llm?.notes
             ? { teamNotes: context.syncConfig.llm.notes }
             : {}),
@@ -128,7 +164,22 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
 
   const provider = context.llmProvider ?? createLlmProviderForModel(modelId);
   const raw = await provider.complete({ envelope, apiKey: context.apiKey });
-  let output = parseCodegenOutput(raw);
+  let output: Awaited<ReturnType<typeof parseCodegenOutput>>;
+  try {
+    output = parseCodegenOutput(raw);
+  } catch (parseError) {
+    const repairEnvelope = buildRepairEnvelope(envelope, {
+      attempt: 1,
+      gateName: "json-parse",
+      gateExitCode: 1,
+      truncatedStderr: buildJsonParseRepairInstructions(parseError, raw),
+    });
+    const repaired = await provider.complete({
+      envelope: repairEnvelope,
+      apiKey: context.apiKey,
+    });
+    output = parseCodegenOutput(repaired);
+  }
   let bestOutput = output;
   let bestIssues = findSyntaxIssues(output.patches);
 
@@ -179,6 +230,20 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
   };
 }
 
+function buildJsonParseRepairInstructions(parseError: unknown, raw: string): string {
+  const detail = parseError instanceof Error ? parseError.message : String(parseError);
+  const excerpt = raw.length > 1800 ? `${raw.slice(0, 1800)}\n...[truncated]` : raw;
+  return `Your previous response was not valid JSON (${detail}).
+
+Re-emit ONLY one complete JSON object matching output_contract — no markdown fences or prose.
+- Escape quotes, backslashes, and newlines inside every patch "content" string (\\", \\\\, \\n).
+- Emit ONLY files that changed; omit unchanged story/test/barrel files unless they need edits.
+- Do not truncate mid-string — finish the JSON object even when patch content is large.
+
+Broken output (for reference):
+${excerpt}`;
+}
+
 function buildSyntaxRepairInstructions(
   issues: ReturnType<typeof findSyntaxIssues>,
   attempt: number,
@@ -222,12 +287,24 @@ function normalizeCodegenPatches(
     };
   });
 
-  return ensureCodegenScaffolds(
-    normalized,
+  const sanitized = sanitizeUpdateBarrelPatches(normalized, {
+    intent: context.intent,
+    existingFiles: context.existingFiles,
+    syncConfig: context.syncConfig,
+    componentName: context.prunedSpec.name,
+  });
+
+  const scaffolded = ensureCodegenScaffolds(
+    sanitized,
     context.syncConfig,
     context.prunedSpec,
     context.existingFiles,
   );
+
+  return finalizeBarrelExportPatches(scaffolded, {
+    existingFiles: context.existingFiles,
+    componentName: context.prunedSpec.name,
+  });
 }
 
 function appendUnresolvedIssuesSummary(

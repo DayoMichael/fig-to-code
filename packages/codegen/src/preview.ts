@@ -25,12 +25,55 @@ export function normalizeGeneratedStyleClasses(
 const STORY_FILE_RE = /\.stories\.(tsx?|jsx?|mdx)$/i;
 const COMPONENT_FILE_RE = /\.(tsx|jsx)$/i;
 
+export interface BuildJobPreviewExistingFiles {
+  files: Array<{ path: string; role: string; content?: string }>;
+}
+
 export interface BuildJobPreviewInput {
   patches: FilePatch[];
   prunedSpec: PrunedSpec;
   storyFormat?: StoryFormat;
   tokenCss?: string;
   tokenCatalog?: TokenCatalog;
+  /** Unchanged repo files to carry into preview when the LLM omits them (update jobs). */
+  existingFiles?: BuildJobPreviewExistingFiles;
+}
+
+const PRESERVE_EXISTING_ROLES = new Set([
+  "component",
+  "story",
+  "test",
+  "barrel",
+  "code-connect",
+  "related",
+]);
+
+/** Storybook-first: keep existing story/support files in preview when update patches omit them. */
+export function mergeExistingFilesIntoPatches(
+  patches: FilePatch[],
+  existingFiles?: BuildJobPreviewExistingFiles,
+): FilePatch[] {
+  if (!existingFiles?.files.length) {
+    return patches;
+  }
+
+  const patchedPaths = new Set(patches.map((patch) => patch.path));
+  const merged = [...patches];
+
+  for (const file of existingFiles.files) {
+    if (patchedPaths.has(file.path)) continue;
+    if (!file.content?.trim()) continue;
+    if (!PRESERVE_EXISTING_ROLES.has(file.role)) continue;
+
+    merged.push({
+      path: file.path,
+      action: "update",
+      content: file.content,
+    });
+    patchedPaths.add(file.path);
+  }
+
+  return merged;
 }
 
 function normalizePatchContent(
@@ -45,7 +88,8 @@ function normalizePatchContent(
 }
 
 export function buildJobPreview(input: BuildJobPreviewInput): JobBuildPreview {
-  const { patches, prunedSpec, storyFormat = "none", tokenCss, tokenCatalog } = input;
+  const { prunedSpec, storyFormat = "none", tokenCss, tokenCatalog, existingFiles } = input;
+  const patches = mergeExistingFilesIntoPatches(input.patches, existingFiles);
   const storyPatch = patches.find(
     (patch) => patch.action !== "delete" && patch.content && STORY_FILE_RE.test(patch.path),
   );

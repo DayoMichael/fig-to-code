@@ -89,4 +89,61 @@ describe("buildJobPreview", () => {
     assert.equal(preview.variantLabel, "tone=neutral");
     assert.match(previewSnippet(preview), /Badge\(\)/);
   });
+
+  it("preserves existing story when update patches omit it", () => {
+    const preview = buildJobPreview({
+      prunedSpec: { name: "Button", kind: "component" },
+      storyFormat: "csf3",
+      patches: [
+        {
+          path: "packages/ui/src/Button/Button.tsx",
+          action: "update",
+          content: "export function Button() { return <button />; }\n",
+        },
+      ],
+      existingFiles: {
+        files: [
+          {
+            path: "packages/ui/src/Button/Button.stories.tsx",
+            role: "story",
+            content: "export const Primary = { args: {} };\n",
+          },
+        ],
+      },
+    });
+
+    assert.equal(preview.storyMissing, false);
+    assert.equal(preview.storyPath, "packages/ui/src/Button/Button.stories.tsx");
+    assert.match(preview.storyContent ?? "", /Primary/);
+    assert.ok(
+      preview.files?.some((file) => file.path.endsWith("Button.stories.tsx")),
+    );
+  });
+
+  it("preserves existing component when update patches omit it", () => {
+    const preview = buildJobPreview({
+      prunedSpec: { name: "Button", kind: "component" },
+      storyFormat: "csf3",
+      patches: [
+        {
+          path: "packages/ui/src/Button/Button.stories.tsx",
+          action: "update",
+          content: "export const Primary = { args: { label: 'Go' } };\n",
+        },
+      ],
+      existingFiles: {
+        files: [
+          {
+            path: "packages/ui/src/Button/Button.tsx",
+            role: "component",
+            content: "export function Button() { return <button />; }\n",
+          },
+        ],
+      },
+    });
+
+    assert.equal(preview.componentPath, "packages/ui/src/Button/Button.tsx");
+    assert.match(preview.componentContent ?? "", /export function Button/);
+    assert.equal(preview.storyMissing, false);
+  });
 });
