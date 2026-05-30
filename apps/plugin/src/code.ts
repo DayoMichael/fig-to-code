@@ -33,14 +33,18 @@ const RESOLVE_DEBOUNCE_MS = 300;
 interface ResolveState {
   selectionId: string;
   componentName: string;
+  resolvedComponentName?: string;
   bundleId?: string;
   matched: boolean;
   reason?: string;
+  bundle?: NonNullable<ResolveComponentResponse["bundle"]>;
 }
 
 let lastResolve: ResolveState | null = null;
 let resolveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let resolveRequestSeq = 0;
+let previewRequestSeq = 0;
+let lastScheduledSelectionId: string | null = null;
 
 figma.ui.onmessage = async (msg: PluginMessage) => {
   try {
@@ -89,6 +93,10 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
 
       case "check-job":
         await pollJob(msg.apiBase, msg.jobId);
+        break;
+
+      case "ensure-existing-preview":
+        await ensureExistingPreview(msg);
         break;
     }
   } catch (error) {
@@ -1199,6 +1207,8 @@ function scheduleResolveComponent(node: SceneNode | null): void {
 
   if (!node || !hasValidPushSelection()) {
     lastResolve = null;
+    lastScheduledSelectionId = null;
+    ++resolveRequestSeq;
     figma.ui.postMessage({
       type: "component-resolved",
       mode: "create",
@@ -1211,6 +1221,13 @@ function scheduleResolveComponent(node: SceneNode | null): void {
 
   const selectionId = node.id;
   const componentName = resolveComponentNameFromNode(node);
+
+  if (selectionId !== lastScheduledSelectionId) {
+    ++resolveRequestSeq;
+    ++previewRequestSeq;
+    lastScheduledSelectionId = selectionId;
+  }
+
   if (!componentName) {
     lastResolve = null;
     figma.ui.postMessage({
@@ -1233,8 +1250,9 @@ function scheduleResolveComponent(node: SceneNode | null): void {
       mode: lastResolve.matched ? "update" : "create",
       matched: lastResolve.matched,
       selectionId,
-      componentName,
+      componentName: lastResolve.resolvedComponentName ?? componentName,
       bundleId: lastResolve.bundleId,
+      bundle: lastResolve.bundle,
       reason: lastResolve.reason,
     });
     return;
@@ -1256,6 +1274,87 @@ function resolveComponentNameFromNode(node: SceneNode): string | null {
   if (!raw) return null;
   const head = raw.split(/[/=]/)[0]?.trim();
   return head || raw;
+}
+
+async function ensureExistingPreview(msg: {
+  selectionId: string;
+  componentName: string;
+  componentPath: string;
+  storyPath?: string;
+}): Promise<void> {
+  const previewSeq = ++previewRequestSeq;
+  const [connection, token, atlassianEmail] = await Promise.all([
+    figma.clientStorage.getAsync(STORAGE_KEYS.connection) as Promise<
+      PluginConnection | undefined
+    >,
+    figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
+    figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<
+      string | undefined
+    >,
+  ]);
+
+  if (!connection || !token) {
+    figma.ui.postMessage({ type: "existing-preview-failed" });
+    return;
+  }
+
+  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+
+  try {
+    const previewRes = await fetch(`${apiBase}/preview/existing`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-git-token": token,
+      },
+      body: JSON.stringify({
+        vcs: connection.vcs,
+        componentPath: msg.componentPath,
+        componentName: msg.componentName,
+        storyPath: msg.storyPath,
+        atlassianEmail,
+        tokenPaths:
+          connection.syncConfig.web?.tokenPaths ??
+          connection.syncConfig.tokens?.tokenPaths ??
+          connection.detected.tokenPaths,
+      }),
+    });
+
+    if (previewSeq !== previewRequestSeq) return;
+
+    if (!previewRes.ok) {
+      const errBody = (await previewRes.json().catch(() => ({}))) as { error?: string };
+      console.warn("[fig2code] existing preview failed", previewRes.status, errBody.error);
+      figma.ui.postMessage({
+        type: "existing-preview-failed",
+        reason: errBody.error ?? `Preview failed (${previewRes.status})`,
+      });
+      return;
+    }
+
+    const data = (await previewRes.json()) as {
+      sessionId: string;
+      previewUrl: string;
+      viteUrl: string;
+    };
+    if (previewSeq !== previewRequestSeq) return;
+
+    figma.ui.postMessage({
+      type: "existing-preview-ready",
+      sessionId: data.sessionId,
+      previewUrl: `${apiBase}${data.previewUrl}`,
+      selectionId: msg.selectionId,
+      componentName: msg.componentName,
+    });
+  } catch (err) {
+    console.warn("[fig2code] existing preview error", err);
+    if (previewSeq === previewRequestSeq) {
+      figma.ui.postMessage({
+        type: "existing-preview-failed",
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 async function runResolveComponent(componentName: string, selectionId: string): Promise<void> {
@@ -1342,79 +1441,28 @@ async function runResolveComponent(componentName: string, selectionId: string): 
       files: body.bundle?.files?.map((f) => f.path),
     });
     if (body.matched && body.bundleId && body.bundle) {
+      const resolvedComponentName = body.bundle.componentName;
+
       lastResolve = {
         selectionId,
         componentName,
+        resolvedComponentName,
         bundleId: body.bundleId,
         matched: true,
         reason: body.bundle.match.reason,
+        bundle: body.bundle,
       };
-
-      const componentFile = body.bundle.files.find(
-        (f: { role: string }) => f.role === "component",
-      );
-      const storyFile = body.bundle.files.find(
-        (f: { role: string }) => f.role === "story",
-      );
 
       figma.ui.postMessage({
         type: "component-resolved",
         mode: "update",
         matched: true,
         selectionId,
-        componentName,
+        componentName: resolvedComponentName,
         bundleId: body.bundleId,
         bundle: body.bundle,
         reason: body.bundle.match.reason,
       });
-
-      if (componentFile) {
-        const previewSeq = seq;
-        fetch(`${apiBase}/preview/existing`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-git-token": token,
-          },
-          body: JSON.stringify({
-            vcs: connection.vcs,
-            componentPath: componentFile.path,
-            componentName: body.bundle.componentName,
-            storyPath: storyFile?.path,
-            atlassianEmail,
-            tokenPaths:
-              connection.syncConfig.web?.tokenPaths ??
-              connection.syncConfig.tokens?.tokenPaths ??
-              connection.detected.tokenPaths,
-          }),
-        })
-          .then(async (previewRes) => {
-            if (previewSeq !== resolveRequestSeq) return;
-            if (!previewRes.ok) {
-              console.warn("[fig2code] existing preview failed", previewRes.status);
-              figma.ui.postMessage({ type: "existing-preview-failed" });
-              return;
-            }
-            const data = (await previewRes.json()) as {
-              sessionId: string;
-              previewUrl: string;
-              viteUrl: string;
-            };
-            if (previewSeq !== resolveRequestSeq) return;
-            figma.ui.postMessage({
-              type: "existing-preview-ready",
-              sessionId: data.sessionId,
-              previewUrl: `${apiBase}${data.previewUrl}`,
-              selectionId,
-            });
-          })
-          .catch((err) => {
-            console.warn("[fig2code] existing preview error", err);
-            if (previewSeq === resolveRequestSeq) {
-              figma.ui.postMessage({ type: "existing-preview-failed" });
-            }
-          });
-      }
     } else {
       lastResolve = {
         selectionId,
@@ -1514,4 +1562,11 @@ type PluginMessage =
   | { type: "save-setup"; overrides: SetupOverrides }
   | SaveLlmMessage
   | PushSelectionMessage
-  | { type: "check-job"; jobId: string; apiBase: string };
+  | { type: "check-job"; jobId: string; apiBase: string }
+  | {
+      type: "ensure-existing-preview";
+      selectionId: string;
+      componentName: string;
+      componentPath: string;
+      storyPath?: string;
+    };

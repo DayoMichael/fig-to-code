@@ -5,6 +5,7 @@ import type { CapabilitiesResponse } from "@fig2code/spec";
 import { MODEL_CATALOG } from "@fig2code/llm";
 import { createReposRouter } from "./repos.js";
 import { createJobsRouter } from "./jobs.js";
+import { createRepoCloneCache } from "./repo-cache.js";
 
 const app = new Hono();
 
@@ -18,8 +19,9 @@ app.use(
   }),
 );
 
-app.route("/repos", createReposRouter());
-app.route("/", createJobsRouter());
+const repoCache = createRepoCloneCache();
+app.route("/repos", createReposRouter({ repoCache }));
+app.route("/", createJobsRouter({ repoCache }));
 
 app.get("/health", (c) => c.json({ ok: true, service: "fig2code-api" }));
 

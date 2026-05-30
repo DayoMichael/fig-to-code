@@ -213,6 +213,8 @@ const editedFiles = new Set<string>();
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let savedFadeTimer: ReturnType<typeof setTimeout> | null = null;
 let previewActionLog: PreviewActionEntry[] = [];
+let previewHarnessReady = false;
+let previewReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
 const actionButtons = [
   loadBranchesBtn,
@@ -418,14 +420,67 @@ function buildPreviewUrl(jobId: string): string {
   return `${apiBase}/jobs/${jobId}/preview`;
 }
 
-function prepareExistingPreview(bundle: ResolvedBundleSummary): void {
-  if (existingPreviewSessionId) {
-    fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}`, {
-      method: "DELETE",
-    }).catch(() => {});
-    existingPreviewSessionId = null;
+function withPreviewReloadToken(previewUrl: string, componentName?: string): string {
+  try {
+    const parsed = new URL(previewUrl, apiBase);
+    if (componentName) {
+      parsed.searchParams.set("fig2codeComponent", componentName);
+    }
+    parsed.searchParams.set("fig2codeReload", String(Date.now()));
+    return parsed.toString();
+  } catch {
+    return previewUrl;
+  }
+}
+
+function clearPreviewReadyTimer(): void {
+  if (previewReadyTimer) {
+    clearTimeout(previewReadyTimer);
+    previewReadyTimer = null;
+  }
+}
+
+function requestExistingPreviewForBundle(
+  bundle: ResolvedBundleSummary,
+  selectionId: string | null,
+): void {
+  if (!selectionId) return;
+  const componentFile = bundle.files.find((f) => f.role === "component");
+  const storyFile = bundle.files.find((f) => f.role === "story");
+  if (!componentFile) return;
+
+  parent.postMessage(
+    {
+      pluginMessage: {
+        type: "ensure-existing-preview",
+        selectionId,
+        componentName: bundle.componentName,
+        componentPath: componentFile.path,
+        storyPath: storyFile?.path,
+      },
+    },
+    "*",
+  );
+}
+
+function syncPreviewVisualState(): void {
+  const waiting = Boolean(currentBuildPreview) && !currentPreviewUrl;
+  if (waiting) {
+    buildPreviewFrameEl.classList.add("hidden");
+    buildPreviewEmptyEl.classList.remove("hidden");
+    buildPreviewEmptyEl.textContent = `Loading ${currentBuildPreview?.componentName ?? "component"} preview…`;
+    return;
   }
 
+  if (currentPreviewUrl) {
+    buildPreviewEmptyEl.classList.add("hidden");
+  }
+}
+
+function prepareExistingPreview(
+  bundle: ResolvedBundleSummary,
+  selectionId: string | null,
+): void {
   const componentFile = bundle.files.find((f) => f.role === "component");
   const storyFile = bundle.files.find((f) => f.role === "story");
   const previewMetadata = componentFile?.content
@@ -463,26 +518,48 @@ function prepareExistingPreview(bundle: ResolvedBundleSummary): void {
   refreshCodeExplorers();
   renderPreviewControls(preview);
 
-  // Preview section stays hidden — only shown when Vite is ready
-  buildPreviewSection.classList.add("hidden");
+  buildPreviewSection.classList.remove("hidden");
+  buildPreviewCardEl.classList.remove("hidden");
+  previewWorkflowEl.classList.remove("hidden");
+  syncPreviewVisualState();
+  requestExistingPreviewForBundle(bundle, selectionId);
+}
+
+function reloadPreviewFrame(frame: HTMLIFrameElement, url: string): void {
+  frame.onload = () => {
+    postPreviewArgsToFrame(frame);
+  };
+  frame.src = url;
 }
 
 function revealExistingPreview(sessionId: string, proxyUrl: string): void {
+  clearPreviewReadyTimer();
+  previewHarnessReady = false;
   existingPreviewSessionId = sessionId;
   currentPreviewJobId = sessionId;
-  currentPreviewUrl = proxyUrl;
+  const reloadUrl = withPreviewReloadToken(
+    proxyUrl,
+    currentBuildPreview?.componentName,
+  );
+  currentPreviewUrl = reloadUrl;
 
   if (currentBuildPreview) {
     renderPreviewControls(currentBuildPreview);
   }
   buildPreviewFormatEl.textContent = "Existing component";
 
-  buildPreviewFrameEl.onload = () => {
-    postPreviewArgsToFrame(buildPreviewFrameEl);
-  };
-  buildPreviewFrameEl.src = proxyUrl;
+  reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
   buildPreviewFrameEl.classList.remove("hidden");
   buildPreviewEmptyEl.classList.add("hidden");
+
+  previewReadyTimer = setTimeout(() => {
+    if (previewHarnessReady) return;
+    buildPreviewFrameEl.classList.add("hidden");
+    buildPreviewEmptyEl.classList.remove("hidden");
+    buildPreviewEmptyEl.textContent =
+      `Preview did not load for ${currentBuildPreview?.componentName ?? "component"}. ` +
+      "Check that the API is running, then select the component again.";
+  }, 15000);
 
   setPreviewViewMode("preview");
   buildPreviewSection.classList.remove("hidden");
@@ -984,17 +1061,31 @@ function setupCodeEditorEvents(explorer: CodeExplorerElements) {
   });
 }
 
-function postPreviewArgsToFrame(frame: HTMLIFrameElement) {
-  if (!frame.src || frame.classList.contains("hidden")) {
-    return;
+function previewFrameTargetOrigin(frame: HTMLIFrameElement): string {
+  try {
+    const src = frame.src || frame.getAttribute("src") || "";
+    if (src && src !== "about:blank") {
+      return new URL(src, window.location.href).origin;
+    }
+  } catch {
+    /* fall through */
   }
+  return previewMessageOrigin();
+}
 
-  frame.contentWindow?.postMessage(
+function postPreviewArgsToFrame(frame: HTMLIFrameElement) {
+  const target = frame.contentWindow;
+  if (!target) return;
+
+  const src = frame.src;
+  if (!src || src === "about:blank") return;
+
+  target.postMessage(
     {
       type: PREVIEW_ARGS_MESSAGE,
       args: selectedPreviewArgs,
     },
-    previewMessageOrigin(),
+    previewFrameTargetOrigin(frame),
   );
 }
 
@@ -1081,7 +1172,7 @@ function appendPreviewInputControl(
   input.type = controlType;
   input.dataset.previewArgKey = name;
   input.value = String(selectedPreviewArgs[name] ?? "");
-  input.onchange = () => {
+  const syncInputArg = () => {
     if (controlType === "number") {
       const parsed = Number(input.value);
       selectedPreviewArgs[name] = Number.isFinite(parsed) ? parsed : input.value;
@@ -1090,6 +1181,8 @@ function appendPreviewInputControl(
     }
     refreshPreviewFrames();
   };
+  input.oninput = syncInputArg;
+  input.onchange = syncInputArg;
 
   field.append(label, input);
   container.appendChild(field);
@@ -1171,10 +1264,15 @@ function renderPreviewControls(preview: BuildPreview) {
   previewSelectGroupEl.classList.toggle("hidden", selectCount === 0);
   previewInputGroupEl.classList.toggle("hidden", inputCount === 0);
   previewBooleanGroupEl.classList.toggle("hidden", booleanCount === 0);
+
+  if (currentPreviewUrl) {
+    postPreviewArgsToFrame(buildPreviewFrameEl);
+    postPreviewArgsToFrame(previewModalFrameEl);
+  }
 }
 
 function refreshPreviewFrames() {
-  if (!currentPreviewJobId) return;
+  if (!currentPreviewUrl) return;
 
   postPreviewArgsToFrame(buildPreviewFrameEl);
   postPreviewArgsToFrame(previewModalFrameEl);
@@ -1209,6 +1307,7 @@ function setPreviewFrame(frame: HTMLIFrameElement, emptyEl: HTMLElement, preview
   frame.onload = null;
   frame.classList.add("hidden");
   emptyEl.classList.remove("hidden");
+  emptyEl.textContent = "Preview will appear after a successful build.";
 }
 function storyFormatLabel(format: BuildPreview["storyFormat"]): string {
   switch (format) {
@@ -1239,6 +1338,34 @@ function clearValidatedBuildState() {
   syncBuildUiState();
 }
 
+function resetPreviewForSelectionChange() {
+  hideBuildProgress();
+  clearPreviewReadyTimer();
+  previewHarnessReady = false;
+  currentPreviewUrl = null;
+  currentPreviewJobId = null;
+  currentBuildPreview = null;
+  selectedPreviewArgs = {};
+  selectedPreviewFilePath = null;
+  selectedPreviewFileContent = "";
+  previewActionLog = [];
+  buildPreviewSelectControlsEl.innerHTML = "";
+  buildPreviewInputControlsEl.innerHTML = "";
+  buildPreviewBooleanControlsEl.innerHTML = "";
+  buildPreviewControlsEl.classList.add("hidden");
+  previewSelectGroupEl.classList.add("hidden");
+  previewInputGroupEl.classList.add("hidden");
+  previewBooleanGroupEl.classList.add("hidden");
+  buildPreviewVariantEl.classList.remove("hidden");
+  setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, null);
+  buildPreviewSection.classList.add("hidden");
+  previewWorkflowEl.classList.add("hidden");
+  closePreviewModal();
+  syncPreviewVisualState();
+  syncBuildUiState();
+  syncDefaultDisabled();
+}
+
 function showBuildPreview(preview: BuildPreview, jobId: string) {
   // Clean up existing component preview if we're now showing a codegen result
   if (existingPreviewSessionId) {
@@ -1265,7 +1392,7 @@ function showBuildPreview(preview: BuildPreview, jobId: string) {
 }
 
 function hideBuildPreview(resetWorkflow = true) {
-  if (existingPreviewSessionId) {
+  if (resetWorkflow && existingPreviewSessionId) {
     fetch(`${apiBase}/preview/existing/${existingPreviewSessionId}`, {
       method: "DELETE",
     }).catch(() => {});
@@ -2345,7 +2472,7 @@ window.onmessage = (event: MessageEvent) => {
 
     if (nextSelectionId !== currentSelectionId) {
       clearMatchState();
-      hideBuildPreview();
+      resetPreviewForSelectionChange();
     }
 
     currentSelectionId = nextSelectionId;
@@ -2375,7 +2502,7 @@ window.onmessage = (event: MessageEvent) => {
       componentWorkflowMode = "update";
       currentResolvedBundle = msg.bundle as ResolvedBundleSummary;
       renderResolvedBundle(currentResolvedBundle);
-      prepareExistingPreview(currentResolvedBundle);
+      prepareExistingPreview(currentResolvedBundle, selId);
       showBuildProgress(currentResolvedBundle.componentName);
       statusEl.textContent = `Found ${currentResolvedBundle.componentName} — building preview…`;
     } else {
@@ -2405,9 +2532,17 @@ window.onmessage = (event: MessageEvent) => {
 
   if (msg.type === "existing-preview-failed") {
     hideBuildProgress();
-    statusEl.textContent = "Preview could not be built — you can still browse the code files.";
+    clearPreviewReadyTimer();
+    const reason =
+      typeof msg.reason === "string" && msg.reason.trim()
+        ? msg.reason.trim()
+        : "Preview could not be built — you can still browse the code files.";
+    statusEl.textContent = reason;
     if (currentBuildPreview) {
       buildPreviewFormatEl.textContent = "Existing component";
+      buildPreviewFrameEl.classList.add("hidden");
+      buildPreviewEmptyEl.classList.remove("hidden");
+      buildPreviewEmptyEl.textContent = reason;
       setPreviewViewMode("code");
       refreshCodeExplorers();
       buildPreviewSection.classList.remove("hidden");
@@ -2520,7 +2655,9 @@ window.onmessage = (event: MessageEvent) => {
     if (job.status === "validated" && job.buildPreview) {
       lastValidatedSelectionId = currentSelectionId;
       setPreviewBusy(false);
-      showBuildPreview(job.buildPreview, job.id);
+      if (!existingPreviewSessionId) {
+        showBuildPreview(job.buildPreview, job.id);
+      }
     } else if (job.status === "failed" || job.status === "needs_manual_fix") {
       if (!preservedRun) {
         clearValidatedBuildState();
@@ -2550,6 +2687,10 @@ window.addEventListener("message", (event: MessageEvent) => {
   }
 
   if (event.data?.type === PREVIEW_READY_MESSAGE) {
+    previewHarnessReady = true;
+    clearPreviewReadyTimer();
+    buildPreviewFrameEl.classList.remove("hidden");
+    buildPreviewEmptyEl.classList.add("hidden");
     postPreviewArgsToFrame(buildPreviewFrameEl);
     postPreviewArgsToFrame(previewModalFrameEl);
     return;

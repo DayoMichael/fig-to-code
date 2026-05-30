@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile as readFs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -19,8 +19,9 @@ import {
   buildTokenConfigFromRemote,
   resolveComponentBundle,
 } from "@fig2code/repo";
-import { createGitHostProvider, defaultBranch, GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
+import { createGitHostProvider, GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
 import { createBundleStore, type BundleStore } from "./bundle-store.js";
+import { createRepoCloneCache, type RepoCloneCache } from "./repo-cache.js";
 
 export interface ConnectRequestBody {
   vcs: VcsConfig;
@@ -39,11 +40,13 @@ export interface ConnectResponseBody {
 
 export interface ReposRouterOptions {
   bundleStore?: BundleStore;
+  repoCache?: RepoCloneCache;
 }
 
 export function createReposRouter(options: ReposRouterOptions = {}): Hono {
   const app = new Hono();
   const bundleStore = options.bundleStore ?? createBundleStore();
+  const repoCache = options.repoCache ?? createRepoCloneCache();
 
   app.post("/refs", async (c) => {
     let provider: string | undefined;
@@ -186,24 +189,17 @@ export function createReposRouter(options: ReposRouterOptions = {}): Hono {
       const body = parseResolveComponentBody(raw);
       provider = body.vcs.provider;
 
-      const git = createGitHostProvider(body.vcs.provider);
-      const ref = defaultBranch(body.vcs);
-      const auth = gitAuth({
-        vcs: body.vcs,
-        token: body.token,
-        atlassianEmail: body.atlassianEmail,
-      });
+      const clonePath = await repoCache.getOrClone(
+        body.vcs,
+        body.token,
+        body.atlassianEmail,
+      );
 
-      const readFile = async (path: string): Promise<string | null> => {
+      const readFile = async (filePath: string): Promise<string | null> => {
         try {
-          return await git.readFile(body.vcs, auth, path, ref);
-        } catch (error) {
-          if (error instanceof GitHostApiError) {
-            if (error.status === 404 || error.status === 401 || error.status === 403) {
-              return null;
-            }
-          }
-          throw error;
+          return await readFs(join(clonePath, filePath), "utf-8");
+        } catch {
+          return null;
         }
       };
 

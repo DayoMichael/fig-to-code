@@ -28,7 +28,7 @@ export interface RepoCloneCache {
 const MAX_CACHE_SIZE = 4;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-function repoCacheKey(vcs: VcsConfig): string {
+export function repoCacheKey(vcs: VcsConfig): string {
   const branch = vcs.baseBranch || "main";
   switch (vcs.provider) {
     case "github":
@@ -38,6 +38,11 @@ function repoCacheKey(vcs: VcsConfig): string {
     case "gitlab":
       return `gitlab-${vcs.projectIdOrPath}-${branch}`;
   }
+}
+
+/** Stable preview session id per connected repo (reuse Vite across component swaps). */
+export function repoPreviewSessionId(vcs: VcsConfig): string {
+  return `repo-preview-${repoCacheKey(vcs)}`;
 }
 
 export function createRepoCloneCache(): RepoCloneCache {

@@ -9,7 +9,7 @@ import {
   createPreviewSessionManager,
   type PreviewSession,
 } from "./preview-session.js";
-import { createRepoCloneCache, type RepoCloneCache } from "./repo-cache.js";
+import { createRepoCloneCache, repoPreviewSessionId, type RepoCloneCache } from "./repo-cache.js";
 import type { Context } from "hono";
 
 export interface JobsRouterOptions {
@@ -31,6 +31,10 @@ const PASS_THROUGH_HEADERS = [
 async function proxyToVite(
   c: Context,
   session: PreviewSession,
+  hooks?: {
+    recover?: (sessionId: string) => Promise<boolean>;
+    getSession?: (sessionId: string) => PreviewSession | undefined;
+  },
 ): Promise<Response> {
   const reqPath = c.req.path;
   const targetUrl = `${session.previewUrl}${reqPath}`;
@@ -61,18 +65,31 @@ async function proxyToVite(
       headers,
     });
   } catch (err) {
+    const cause = err instanceof Error ? (err.cause as NodeJS.ErrnoException | undefined) : undefined;
+    const code = cause?.code;
+    const isConnectionError =
+      code === "ECONNREFUSED" ||
+      code === "ECONNRESET" ||
+      code === "UND_ERR_SOCKET";
+
+    if (hooks?.recover && hooks.getSession && isConnectionError) {
+      console.warn(`[fig2code] vite unreachable for ${session.jobId} — recovering`);
+      const recovered = await hooks.recover(session.jobId);
+      if (recovered) {
+        const fresh = hooks.getSession(session.jobId);
+        if (fresh) {
+          return proxyToVite(c, fresh, hooks);
+        }
+      }
+      return new Response("Preview updating…", {
+        status: 503,
+        headers: { "Retry-After": "1" },
+      });
+    }
+
     console.error(`[fig2code] proxy error: ${targetUrl}`, err);
     return c.json({ error: "Proxy error" }, 502);
   }
-}
-
-function previewSessionSlug(name: string): string {
-  const slug = name
-    .trim()
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase();
-  return slug || "component";
 }
 
 export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
@@ -81,6 +98,11 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   const repoCache = options.repoCache ?? createRepoCloneCache();
   const previewSessions = createPreviewSessionManager(repoCache);
   options.onCleanup?.(() => Promise.all([previewSessions.stopAll(), repoCache.evictAll()]).then(() => {}));
+
+  const previewProxyHooks = {
+    recover: (sessionId: string) => previewSessions.recoverVite(sessionId),
+    getSession: (sessionId: string) => previewSessions.getSession(sessionId),
+  };
 
   const app = new Hono();
 
@@ -243,10 +265,10 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       return c.json({ error: "vcs, componentPath, and componentName are required" }, 400);
     }
 
-    const sessionId = `existing-${previewSessionSlug(body.componentName)}-${Date.now()}`;
+    const sessionId = repoPreviewSessionId(body.vcs);
 
     try {
-      const session = await previewSessions.startExistingSession(sessionId, {
+      const { session, reused } = await previewSessions.openExistingPreview(sessionId, {
         componentPath: body.componentPath,
         componentName: body.componentName,
         storyPath: body.storyPath,
@@ -260,6 +282,7 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
         sessionId,
         previewUrl: `/preview/existing/${sessionId}/`,
         viteUrl: session.previewUrl,
+        reused,
       });
     } catch (err) {
       console.error("[fig2code] existing preview start failed", err);
@@ -274,13 +297,25 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   app.get("/preview/existing/:sessionId/", async (c) => {
     const session = previewSessions.getSession(c.req.param("sessionId"));
     if (!session) return c.json({ error: "Preview session not found" }, 404);
-    return proxyToVite(c, session);
+    if (!session.ready) {
+      return new Response("Preview updating…", {
+        status: 503,
+        headers: { "Retry-After": "1" },
+      });
+    }
+    return proxyToVite(c, session, previewProxyHooks);
   });
 
   app.all("/preview/existing/:sessionId/*", async (c) => {
     const session = previewSessions.getSession(c.req.param("sessionId"));
     if (!session) return c.json({ error: "Preview session not found" }, 404);
-    return proxyToVite(c, session);
+    if (!session.ready) {
+      return new Response("Preview updating…", {
+        status: 503,
+        headers: { "Retry-After": "1" },
+      });
+    }
+    return proxyToVite(c, session, previewProxyHooks);
   });
 
   app.delete("/preview/existing/:sessionId", async (c) => {

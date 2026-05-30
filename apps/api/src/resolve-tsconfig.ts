@@ -10,6 +10,12 @@ export interface HarnessResolveConfig {
   include: string[];
   /** Repo-relative paths to react / react-dom when found near the component. */
   reactModules?: { react: string; reactDom: string };
+  /**
+   * Posix path (relative to repo root) of the package that owns the component.
+   * Used to pre-scan all of its sources so Vite optimizes every dependency in a
+   * single pass (prevents duplicate React from mid-session re-optimization).
+   */
+  componentPackageRoot?: string;
 }
 
 function stripJsonComments(raw: string): string {
@@ -63,6 +69,14 @@ export async function resolveHarnessTsConfig(
   let dir = path.dirname(componentAbs);
   const repoRoot = repoClonePath;
 
+  const componentPackageAbs = await findNearestPackageRoot(
+    path.dirname(componentAbs),
+    repoRoot,
+  );
+  const componentPackageRoot = componentPackageAbs
+    ? toPosixRelative(repoRoot, componentPackageAbs)
+    : undefined;
+
   while (dir.startsWith(repoRoot)) {
     const tsconfigPath = path.join(dir, "tsconfig.json");
     try {
@@ -110,6 +124,7 @@ export async function resolveHarnessTsConfig(
           tsPaths,
           include: [...include],
           reactModules,
+          componentPackageRoot,
         };
       }
     } catch {
@@ -130,6 +145,7 @@ export async function resolveHarnessTsConfig(
     tsPaths: { "@/*": ["../src/*"] },
     include: ["./**/*", "../src/**/*"],
     reactModules,
+    componentPackageRoot,
   };
 }
 

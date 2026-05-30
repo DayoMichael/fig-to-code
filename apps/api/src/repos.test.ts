@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { Hono } from "hono";
 import { fixturePath } from "@fig2code/repo";
@@ -7,6 +10,28 @@ import type { ResolveComponentResponse } from "@fig2code/spec";
 import app from "./index.js";
 import { createBundleStore } from "./bundle-store.js";
 import { createReposRouter, formatRepoUrl } from "./repos.js";
+import type { RepoCloneCache } from "./repo-cache.js";
+
+async function createResolveTestRepoCache(
+  files: Record<string, string>,
+): Promise<{ repoCache: RepoCloneCache; clonePath: string }> {
+  const clonePath = await mkdtemp(join(tmpdir(), "fig2code-resolve-test-"));
+  for (const [relPath, content] of Object.entries(files)) {
+    const fullPath = join(clonePath, relPath);
+    await mkdir(join(fullPath, ".."), { recursive: true });
+    await writeFile(fullPath, content, "utf-8");
+  }
+  const repoCache: RepoCloneCache = {
+    getOrClone: async () => clonePath,
+    evict: async () => {
+      await rm(clonePath, { recursive: true, force: true });
+    },
+    evictAll: async () => {
+      await rm(clonePath, { recursive: true, force: true });
+    },
+  };
+  return { repoCache, clonePath };
+}
 
 describe("repos routes", () => {
   it("GET /repos/fixtures lists fixture paths", async () => {
@@ -95,40 +120,16 @@ describe("repos routes", () => {
 
   it("POST /repos/resolve-component returns matched bundle and stores it for retrieval", async () => {
     const bundleStore = createBundleStore({ ttlMs: 60_000 });
-    const repos = createReposRouter({ bundleStore });
-    const reposApp = new Hono();
-    reposApp.route("/repos", repos);
-
     const componentSrc = "export const Button = () => null;\n";
     const storySrc =
       "import { Button } from './Button';\nexport default { component: Button };\n";
-
-    setFetchImplementation((async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input.toString();
-      const decoded = decodeURIComponent(url);
-      const inferredPath = decoded.split("/contents/")[1]?.split("?")[0];
-
-      const files: Record<string, string> = {
-        "src/components/Button/Button.tsx": componentSrc,
-        "src/components/Button/Button.stories.tsx": storySrc,
-      };
-
-      if (inferredPath && files[inferredPath]) {
-        return new Response(
-          JSON.stringify({
-            type: "file",
-            encoding: "base64",
-            content: Buffer.from(files[inferredPath]!, "utf8").toString("base64"),
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-
-      return new Response(JSON.stringify({ message: "Not Found" }), {
-        status: 404,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch);
+    const { repoCache, clonePath } = await createResolveTestRepoCache({
+      "src/components/Button/Button.tsx": componentSrc,
+      "src/components/Button/Button.stories.tsx": storySrc,
+    });
+    const repos = createReposRouter({ bundleStore, repoCache });
+    const reposApp = new Hono();
+    reposApp.route("/repos", repos);
 
     try {
       const res = await reposApp.request("/repos/resolve-component", {
@@ -187,20 +188,15 @@ describe("repos routes", () => {
       };
       assert.equal(bundleBody.bundle.componentName, "Button");
     } finally {
-      resetFetchImplementation();
+      await rm(clonePath, { recursive: true, force: true });
     }
   });
 
   it("POST /repos/resolve-component returns matched:false when no files exist", async () => {
-    const repos = createReposRouter();
+    const { repoCache, clonePath } = await createResolveTestRepoCache({});
+    const repos = createReposRouter({ repoCache });
     const reposApp = new Hono();
     reposApp.route("/repos", repos);
-
-    setFetchImplementation((async () =>
-      new Response(JSON.stringify({ message: "Not Found" }), {
-        status: 404,
-        headers: { "content-type": "application/json" },
-      })) as typeof fetch);
 
     try {
       const res = await reposApp.request("/repos/resolve-component", {
@@ -248,7 +244,7 @@ describe("repos routes", () => {
       assert.equal(body.matched, false);
       assert.equal(body.bundleId, undefined);
     } finally {
-      resetFetchImplementation();
+      await rm(clonePath, { recursive: true, force: true });
     }
   });
 });

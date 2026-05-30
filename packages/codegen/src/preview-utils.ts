@@ -149,25 +149,13 @@ export function enrichPreviewArgs(
 }
 
 export function defaultPreviewArgs(preview: JobBuildPreview): Record<string, unknown> {
-  const variants = preview.variants ?? {};
-  const variantArgs = argsFromVariantSelection(
-    variants,
-    resolveInitialVariantSelection(
-      variants,
-      preview.componentContent,
-      preview.storyContent,
-    ),
+  const args = resolveInitialPreviewArgs(
+    preview.variants ?? {},
+    preview.propControls ?? [],
+    preview.componentContent,
+    preview.storyContent,
   );
-  const componentDefaults = preview.componentContent
-    ? extractComponentDefaultPropValues(preview.componentContent)
-    : {};
-  const storyArgs = preview.storyContent
-    ? extractStoryDefaultArgs(preview.storyContent)
-    : {};
-  return enrichPreviewArgs(
-    { ...variantArgs, ...componentDefaults, ...storyArgs },
-    preview.componentName,
-  );
+  return enrichPreviewArgs(args, preview.componentName);
 }
 
 export function extractHandlerPropNames(source: string): string[] {

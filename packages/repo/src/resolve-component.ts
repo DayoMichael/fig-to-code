@@ -204,13 +204,39 @@ async function findFirstComponentFile(
   candidates: PathCandidate[],
   readFile: ResolveFileReader,
 ): Promise<{ candidate: PathCandidate; content: string } | null> {
-  for (const candidate of candidates) {
-    if (candidate.role !== "component") continue;
+  const componentCandidates = candidates.filter((candidate) => candidate.role === "component");
+  const prioritized = componentCandidates.filter(
+    (candidate) => candidate.source === "registry" || candidate.source === "detected",
+  );
+  const conventional = componentCandidates.filter(
+    (candidate) => candidate.source !== "registry" && candidate.source !== "detected",
+  );
+
+  for (const candidate of prioritized) {
     const content = await readFile(candidate.path);
     if (content && content.trim().length > 0) {
       return { candidate, content };
     }
   }
+
+  const batchSize = 8;
+  for (let index = 0; index < conventional.length; index += batchSize) {
+    const batch = conventional.slice(index, index + batchSize);
+    const hits = await Promise.all(
+      batch.map(async (candidate) => {
+        const content = await readFile(candidate.path);
+        if (content && content.trim().length > 0) {
+          return { candidate, content };
+        }
+        return null;
+      }),
+    );
+    const hit = hits.find(Boolean);
+    if (hit) {
+      return hit;
+    }
+  }
+
   return null;
 }
 
