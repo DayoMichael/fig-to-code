@@ -559,6 +559,19 @@
         color: var(--figma-color-text-secondary, #666);
         line-height: 1.4;
       }
+      .match-badge.is-absent {
+        background: var(--figma-color-bg-secondary, #e8e8e8);
+        color: var(--figma-color-text-secondary, #666);
+      }
+      .match-actions {
+        margin-top: 6px;
+      }
+      .match-actions button.match-create-btn {
+        width: 100%;
+        margin: 0;
+        padding: 8px 12px;
+        font-size: 12px;
+      }
       .match-file-list {
         list-style: none;
         margin: 0;
@@ -2062,6 +2075,19 @@
         color: var(--figma-color-text-secondary, #666);
         line-height: 1.4;
       }
+      .match-badge.is-absent {
+        background: var(--figma-color-bg-secondary, #e8e8e8);
+        color: var(--figma-color-text-secondary, #666);
+      }
+      .match-actions {
+        margin-top: 6px;
+      }
+      .match-actions button.match-create-btn {
+        width: 100%;
+        margin: 0;
+        padding: 8px 12px;
+        font-size: 12px;
+      }
       .match-file-list {
         list-style: none;
         margin: 0;
@@ -3304,6 +3330,7 @@
             <span class="match-name" id="match-name"></span>
           </div>
           <p class="match-reason" id="match-reason"></p>
+          <div id="match-actions" class="match-actions hidden"></div>
           <ul id="match-file-list" class="match-file-list"></ul>
         </div>
 

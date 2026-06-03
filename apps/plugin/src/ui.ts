@@ -122,8 +122,11 @@ const prModalFormEl = document.getElementById("pr-modal-form")!;
 const prModalSuccessLinkEl = document.getElementById("pr-modal-success-link") as HTMLButtonElement;
 
 const matchSectionEl = document.getElementById("match-section")!;
+const matchBadgeEl = document.getElementById("match-badge")!;
 const matchNameEl = document.getElementById("match-name")!;
 const matchReasonEl = document.getElementById("match-reason")!;
+const matchActionsEl = document.getElementById("match-actions")!;
+const previewActionControlsEl = document.querySelector(".preview-action-controls")!;
 const matchFileListEl = document.getElementById("match-file-list")!;
 const matchSkeletonEl = document.getElementById("match-skeleton")!;
 const previewModalEl = document.getElementById("preview-modal")!;
@@ -282,6 +285,39 @@ function isSetupReady() {
   return setupSaved && !editingSetup;
 }
 
+function isPushInMatchSection() {
+  return matchActionsEl.contains(pushBtn);
+}
+
+function mountPushButtonInMatchSection(show: boolean) {
+  if (show) {
+    if (!isPushInMatchSection()) {
+      matchActionsEl.appendChild(pushBtn);
+    }
+    matchActionsEl.classList.remove("hidden");
+    pushBtn.classList.remove("btn-sm", "preview-action-update", "hidden");
+    pushBtn.classList.add("match-create-btn");
+    return;
+  }
+
+  if (isPushInMatchSection()) {
+    previewActionControlsEl.insertBefore(pushBtn, previewActionControlsEl.firstChild);
+  }
+  matchActionsEl.classList.add("hidden");
+  pushBtn.classList.remove("match-create-btn");
+  pushBtn.classList.add("btn-sm", "preview-action-update");
+}
+
+function shouldShowMatchCreateAction() {
+  return (
+    componentWorkflowMode === "create" &&
+    !currentResolvedBundle &&
+    !currentBuildPreview &&
+    !matchSectionEl.classList.contains("hidden") &&
+    Boolean(matchReasonEl.textContent.trim())
+  );
+}
+
 function syncBuildUiState() {
   if (!isOnMainScreen()) return;
 
@@ -296,13 +332,15 @@ function syncBuildUiState() {
     hasValidSelection &&
     !resolvingMatch &&
     (!builtForCurrentSelection || componentWorkflowMode === "update");
+  const showMatchCreate = shouldShowMatchCreateAction();
 
-  buildPreviewSection.classList.toggle(
-    "hidden",
-    !hasPreview && !canBuild && !currentPreviewUrl,
-  );
+  mountPushButtonInMatchSection(showMatchCreate);
+
+  buildPreviewSection.classList.toggle("hidden", !hasPreview && !currentPreviewUrl);
   buildPreviewCardEl.classList.toggle("hidden", !hasPreview && !currentPreviewUrl);
   previewWorkflowEl.classList.toggle("hidden", !hasPreview);
+  rebuildWithCorrectionsBtn.classList.toggle("hidden", !hasPreview);
+  createPrBtn.classList.toggle("hidden", !hasPreview);
   syncAskToggleVisibility();
   if (!hasPreview && askComposerOpen) {
     setAskComposerOpen(false);
@@ -312,7 +350,11 @@ function syncBuildUiState() {
     .querySelector(".build-preview-header")
     ?.classList.toggle("hidden", !hasPreview && !currentPreviewUrl);
 
-  pushBtn.classList.toggle("hidden", !canBuild);
+  if (isPushInMatchSection()) {
+    pushBtn.classList.remove("hidden");
+  } else {
+    pushBtn.classList.toggle("hidden", !canBuild);
+  }
   syncPushButtonLabel();
 }
 
@@ -341,7 +383,12 @@ function restorePushButtonMarkup() {
 }
 
 function syncPushButtonLabel() {
-  const label = componentWorkflowMode === "update" ? "Update with Figma" : "Build component";
+  const label =
+    componentWorkflowMode === "update"
+      ? "Update with Figma"
+      : isPushInMatchSection()
+        ? "Create component"
+        : "Build component";
   pushBtn.dataset.label = label;
   pushBtn.classList.toggle("is-update", componentWorkflowMode === "update");
   if (!loading || !pushBtn.classList.contains("is-loading")) {
@@ -371,8 +418,11 @@ function clearMatchState() {
   matchFileListEl.innerHTML = "";
   matchNameEl.textContent = "";
   matchReasonEl.textContent = "";
+  matchBadgeEl.textContent = "In repo";
+  matchBadgeEl.classList.remove("is-absent");
+  mountPushButtonInMatchSection(false);
   hideBuildProgress();
-  syncPushButtonLabel();
+  syncBuildUiState();
 }
 
 function showBuildProgress(componentName: string) {
@@ -396,6 +446,9 @@ function hideBuildProgress() {
 }
 
 function renderResolvedBundle(bundle: ResolvedBundleSummary) {
+  matchBadgeEl.textContent = "In repo";
+  matchBadgeEl.classList.remove("is-absent");
+  matchActionsEl.classList.add("hidden");
   matchNameEl.textContent = bundle.componentName;
   matchReasonEl.textContent = bundle.match.reason ?? "";
   matchFileListEl.innerHTML = bundle.files
@@ -405,6 +458,17 @@ function renderResolvedBundle(bundle: ResolvedBundleSummary) {
     )
     .join("");
   matchSectionEl.classList.remove("hidden");
+  syncBuildUiState();
+}
+
+function renderUnmatchedComponent(componentName: string, reason: string) {
+  matchBadgeEl.textContent = "Not in repo";
+  matchBadgeEl.classList.add("is-absent");
+  matchNameEl.textContent = componentName;
+  matchReasonEl.textContent = reason;
+  matchFileListEl.innerHTML = "";
+  matchSectionEl.classList.remove("hidden");
+  syncBuildUiState();
 }
 
 function syncMainScreenLayout(options: { summary?: string; correctedAt?: string; connection?: ConnectionPayload } = {}) {
@@ -3622,12 +3686,17 @@ window.onmessage = (event: MessageEvent) => {
       componentWorkflowMode = "create";
       currentResolvedBundle = null;
       setRepoBaselineFromBundle(null);
-      matchSectionEl.classList.add("hidden");
-      if (msg.reason && typeof msg.reason === "string") {
-        statusEl.textContent = msg.reason;
-      }
+      const componentName =
+        typeof msg.componentName === "string" && msg.componentName.trim()
+          ? msg.componentName.trim()
+          : "Component";
+      const reason =
+        typeof msg.reason === "string" && msg.reason.trim()
+          ? msg.reason.trim()
+          : `No matching files for "${componentName}" in repo.`;
+      renderUnmatchedComponent(componentName, reason);
+      statusEl.textContent = "";
     }
-    syncPushButtonLabel();
     syncDefaultDisabled();
     return;
   }
