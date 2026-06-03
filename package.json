@@ -5,6 +5,10 @@
   "description": "Fig2Code — Figma plugin that generates production-ready code into your team's repo",
   "scripts": {
     "build": "turbo run build",
+    "build:api": "turbo run build --filter=@fig2code/api...",
+    "build:worker": "turbo run build --filter=@fig2code/worker...",
+    "start:api": "pnpm --filter @fig2code/api start",
+    "start:worker": "pnpm --filter @fig2code/worker start",
     "dev": "turbo run dev --parallel",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",

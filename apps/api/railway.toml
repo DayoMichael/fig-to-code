@@ -1,0 +1,10 @@
+# Railway config for the API service.
+# In the service Settings → Config-as-code, set: /apps/api/railway.toml
+
+[build]
+buildCommand = "pnpm turbo run build --filter=@fig2code/api..."
+
+[deploy]
+startCommand = "pnpm start:api"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
