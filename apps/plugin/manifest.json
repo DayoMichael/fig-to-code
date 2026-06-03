@@ -1,13 +1,16 @@
 {
   "name": "Fig2Code",
-  "id": "fig2code-dev",
+  "id": "1644095264374354677",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
   "editorType": ["figma", "dev"],
   "capabilities": ["inspect"],
   "networkAccess": {
-    "allowedDomains": ["https://api.fig2code.dev"],
+    "allowedDomains": [
+      "https://api.fig2code.dev",
+      "https://fig2codeapi-production.up.railway.app"
+    ],
     "devAllowedDomains": [
       "http://localhost:3000",
       "https://localhost:3000",
