@@ -118,7 +118,9 @@ interface SessionManager {
 
 const MAX_SESSIONS = 4;
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
-const VITE_STARTUP_TIMEOUT_MS = 60_000;
+const VITE_STARTUP_TIMEOUT_MS = Number(
+  process.env.FIG2CODE_VITE_STARTUP_TIMEOUT_MS ?? 180_000,
+);
 const PREVIEW_DIR = ".fig2code-preview";
 
 async function findFreePort(): Promise<number> {
@@ -838,7 +840,11 @@ async function startViteForHarness(
 
   let actualPort: number;
   try {
-    actualPort = await waitForViteReady(viteProcess, VITE_STARTUP_TIMEOUT_MS);
+    actualPort = await waitForViteReady(
+      viteProcess,
+      VITE_STARTUP_TIMEOUT_MS,
+      port,
+    );
   } catch (viteErr) {
     console.error(`[fig2code] vite failed to start`, viteErr);
     try {
@@ -893,27 +899,78 @@ async function waitForViteResponding(
 // Vite process helpers
 // ---------------------------------------------------------------------------
 
+function isChildProcessAlive(proc: ChildProcess): boolean {
+  if (proc.killed) return false;
+  return proc.exitCode === null;
+}
+
+/** Parse Vite's "Local:" banner from dev-server stdout/stderr. */
+export function parseViteReadyPort(output: string): number | null {
+  const portMatch = output.match(
+    /Local:\s+https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)/,
+  );
+  return portMatch ? Number(portMatch[1]) : null;
+}
+
 async function waitForViteReady(
   proc: ChildProcess,
   timeoutMs: number,
+  expectedPort: number,
 ): Promise<number> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let output = "";
+
+    const cleanup = () => {
+      proc.stdout?.off("data", onData);
+      proc.stderr?.off("data", onData);
+      clearTimeout(timer);
+      clearInterval(pollTimer);
+    };
+
+    const finish = (port: number) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(port);
+    };
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
     const timer = setTimeout(() => {
-      reject(new Error("Vite dev server failed to start within timeout"));
+      fail(
+        new Error(
+          `Vite dev server failed to start within ${timeoutMs}ms. Last output:\n${output.slice(-4000)}`,
+        ),
+      );
     }, timeoutMs);
 
-    let output = "";
+    const pollTimer = setInterval(() => {
+      if (!isChildProcessAlive(proc)) return;
+      void (async () => {
+        try {
+          const res = await fetch(`http://127.0.0.1:${expectedPort}/`, {
+            signal: AbortSignal.timeout(2000),
+          });
+          if (res.status < 500) {
+            finish(expectedPort);
+          }
+        } catch {
+          /* Vite still booting — keep polling */
+        }
+      })();
+    }, 500);
 
     const onData = (chunk: Buffer) => {
       output += chunk.toString();
-      const portMatch = output.match(
-        /Local:\s+https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/,
-      );
-      if (portMatch) {
-        clearTimeout(timer);
-        proc.stdout?.off("data", onData);
-        proc.stderr?.off("data", onData);
-        resolve(Number(portMatch[1]));
+      const port = parseViteReadyPort(output);
+      if (port !== null) {
+        finish(port);
       }
     };
 
@@ -921,13 +978,11 @@ async function waitForViteReady(
     proc.stderr?.on("data", onData);
 
     proc.on("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`Vite exited with code ${code}. Output:\n${output}`));
+      fail(new Error(`Vite exited with code ${code}. Output:\n${output.slice(-4000)}`));
     });
 
     proc.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
+      fail(err);
     });
   });
 }
@@ -1268,43 +1323,18 @@ export function createPreviewSessionManager(
     await installHarnessDeps(harnessPath);
 
     // 6. Start Vite dev server from the harness directory
-    const port = await findFreePort();
-    const viteBin = path.join(harnessPath, "node_modules", ".bin", "vite");
-
-    console.log(
-      `[fig2code] starting vite dev server on port ${port} for job ${jobId}`,
-    );
-    const viteProcess = spawn(
-      viteBin,
-      ["dev", "--port", String(port), "--host", "127.0.0.1"],
-      {
-        cwd: harnessPath,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, NODE_ENV: "development" },
-        detached: false,
-      },
-    );
-    viteProcess.unref();
-
-    const actualPort = await waitForViteReady(
-      viteProcess,
-      VITE_STARTUP_TIMEOUT_MS,
-    );
-    viteProcess.stdout?.destroy();
-    viteProcess.stderr?.destroy();
-    const previewUrl = `http://127.0.0.1:${actualPort}`;
-
-    console.log(
-      `[fig2code] vite dev server ready at ${previewUrl} for job ${jobId}`,
+    const started = await startViteForHarness(
+      harnessPath,
+      `job ${jobId}`,
     );
 
     const session: PreviewSession = {
       jobId,
       repoClonePath,
       harnessPath,
-      vitePort: actualPort,
-      viteProcess,
-      previewUrl,
+      vitePort: started.vitePort,
+      viteProcess: started.viteProcess,
+      previewUrl: started.previewUrl,
       startedAt: Date.now(),
       lastAccessedAt: Date.now(),
       ready: true,
