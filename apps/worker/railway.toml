@@ -1,8 +1,8 @@
 # Railway config for the worker service.
-# In the service Settings → Config-as-code, set: /apps/worker/railway.toml
+# Settings → Config-as-code → /apps/worker/railway.toml
 
 [build]
-buildCommand = "pnpm turbo run build --filter=@fig2code/worker..."
+buildCommand = "pnpm build:worker"
 
 [deploy]
 startCommand = "pnpm start:worker"

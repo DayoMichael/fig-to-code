@@ -1,3 +1,0 @@
-# Git is required at runtime for repo clone / preview flows.
-[phases.setup]
-nixPkgs = ["nodejs_22", "pnpm", "git"]
