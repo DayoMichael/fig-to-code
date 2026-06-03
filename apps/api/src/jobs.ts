@@ -291,6 +291,9 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
           gitToken: stored.secrets.gitToken,
           atlassianEmail: stored.secrets.atlassianEmail,
           formatter: stored.request.syncConfig.conventions.formatter,
+          tokenPaths: stored.request.syncConfig.web?.tokenPaths,
+          themeCatalog: stored.request.syncConfig.themes,
+          themeSelection: stored.request.prunedSpec.metadata?.previewTheme,
         });
       } catch (err) {
         console.error("[fig2code] preview session start failed", err);
@@ -323,6 +326,21 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
     if (!session) return c.json({ error: "No active preview session" }, 404);
 
     return proxyToVite(c, session);
+  });
+
+  app.post("/jobs/:id/preview/theme", async (c) => {
+    const session = previewSessions.getSession(c.req.param("id"));
+    if (!session) {
+      return c.json({ error: "No active preview session" }, 404);
+    }
+
+    const body = (await c.req.json()) as { brand?: string; mode?: string };
+    try {
+      const selection = await previewSessions.updatePreviewTheme(c.req.param("id"), body);
+      return c.json({ selection });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
   });
 
   app.put("/jobs/:id/preview/files", async (c) => {
@@ -371,6 +389,8 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       storyPath?: string;
       atlassianEmail?: string;
       tokenPaths?: string[];
+      themeCatalog?: import("@fig2code/spec").ThemeCatalog | null;
+      themeSelection?: import("@fig2code/spec").PreviewThemeContext;
     };
 
     if (!body?.vcs?.provider || !body?.componentPath || !body?.componentName) {
@@ -388,6 +408,8 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
         gitToken,
         atlassianEmail: body.atlassianEmail,
         tokenPaths: body.tokenPaths,
+        themeCatalog: body.themeCatalog,
+        themeSelection: body.themeSelection,
       });
 
       return c.json({
@@ -416,6 +438,22 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       });
     }
     return proxyToVite(c, session, previewProxyHooks);
+  });
+
+  app.post("/preview/existing/:sessionId/theme", async (c) => {
+    const sessionId = c.req.param("sessionId");
+    const session = previewSessions.getSession(sessionId);
+    if (!session) {
+      return c.json({ error: "No active preview session" }, 404);
+    }
+
+    const body = (await c.req.json()) as { brand?: string; mode?: string };
+    try {
+      const selection = await previewSessions.updatePreviewTheme(sessionId, body);
+      return c.json({ selection });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
   });
 
   app.put("/preview/existing/:sessionId/files", async (c) => {

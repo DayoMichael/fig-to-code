@@ -11,6 +11,7 @@ import type {
   StyleSystem,
   SyncConfig,
 } from "@fig2code/spec";
+import { discoverThemeCatalog } from "./theme-catalog.js";
 import {
   buildRepoIndex,
   indexChildDirectoryNames,
@@ -131,10 +132,11 @@ export async function detectProjectConfig(options: ScanOptions): Promise<Detecte
     Promise.resolve(detectFileNamingFromIndex(index, componentPaths)),
   ]);
 
-  const [existingTokens, exportStyle, propsPattern] = await Promise.all([
+  const [existingTokens, exportStyle, propsPattern, themeCatalog] = await Promise.all([
     Promise.resolve(detectExistingTokensFromIndex(index, tokenPaths, styleSystem)),
     detectExportStyle(rootDir, existingComponents),
     detectPropsPattern(rootDir, existingComponents),
+    discoverThemeCatalog(rootDir, tokenPaths),
   ]);
 
   return {
@@ -150,6 +152,7 @@ export async function detectProjectConfig(options: ScanOptions): Promise<Detecte
     testFramework,
     storyFormat,
     formatter,
+    themeCatalog,
     hasCodeConnect: existingComponents.some((c) => c.hasCodeConnect),
     platforms,
     existingComponents,
@@ -208,6 +211,10 @@ export function detectedConfigToSyncConfig(
       iconPath: "src/native/icons",
       exampleComponent: "src/native/components/Button/Button.tsx",
     };
+  }
+
+  if (detected.themeCatalog) {
+    config.themes = detected.themeCatalog;
   }
 
   return config;

@@ -3,8 +3,11 @@ import type { FigmaNodeSnapshot } from "@fig2code/figma-ast";
 import type {
   FigmaTextTypography,
   JobRecord,
+  PreviewThemeContext,
   PrunedSpec,
   ResolveComponentResponse,
+  ThemeCatalog,
+  ThemeSelection,
   TokenCatalog,
   TokenConfig,
   TypographyCatalog,
@@ -527,10 +530,14 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
   }
 
   const snapshot = await nodeToSnapshot(node);
+  const previewTheme = await resolveFigmaPreviewTheme(node, connection.syncConfig.themes);
   const prunedSpec = pruneNodeTree(snapshot, {
     typography: connection.syncConfig.typography?.catalog,
     tokenCatalog,
   });
+  if (previewTheme) {
+    prunedSpec.metadata = { ...prunedSpec.metadata, previewTheme };
+  }
 
   console.log("[fig2code] build component snapshot", {
     nodeType: node.type,
@@ -1266,6 +1273,128 @@ async function readComponentPropertyDefinitions(
 
 const PUSH_SELECTION_TYPES = new Set(["COMPONENT", "COMPONENT_SET", "INSTANCE"]);
 
+function slugThemeToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function classifyThemeCollection(collectionName: string): "brand" | "mode" | "unknown" {
+  const slug = slugThemeToken(collectionName);
+  if (/brand/.test(slug)) {
+    return "brand";
+  }
+  if (/theme|mode|appearance|color-scheme/.test(slug)) {
+    return "mode";
+  }
+  return "unknown";
+}
+
+async function collectFigmaVariableModes(node: SceneNode): Promise<Map<string, string>> {
+  const byCollection = new Map<string, string>();
+  let current: BaseNode | null = node;
+
+  while (current && current.type !== "PAGE" && current.type !== "DOCUMENT") {
+    if ("explicitVariableModes" in current) {
+      const modes = current.explicitVariableModes;
+      if (modes) {
+        for (const [collectionId, modeId] of Object.entries(modes)) {
+          if (!byCollection.has(collectionId)) {
+            byCollection.set(collectionId, modeId);
+          }
+        }
+      }
+    }
+    current = current.parent;
+  }
+
+  return byCollection;
+}
+
+function alignPreviewThemeWithCatalog(
+  catalog: ThemeCatalog | null | undefined,
+  partial: Partial<ThemeSelection>,
+): PreviewThemeContext | undefined {
+  if (!catalog?.entries.length) {
+    if (partial.brand || partial.mode) {
+      return { brand: partial.brand, mode: partial.mode };
+    }
+    return undefined;
+  }
+
+  const brand = partial.brand ? slugThemeToken(partial.brand) : undefined;
+  const mode = partial.mode ? slugThemeToken(partial.mode) : undefined;
+
+  if (brand && mode) {
+    const exact = catalog.entries.find(
+      (entry) => entry.brand === brand && entry.mode === mode,
+    );
+    if (exact) {
+      return { brand: exact.brand, mode: exact.mode };
+    }
+  }
+
+  if (brand) {
+    const byBrand = catalog.entries.find((entry) => entry.brand === brand);
+    if (byBrand) {
+      return { brand: byBrand.brand, mode: byBrand.mode };
+    }
+  }
+
+  if (mode) {
+    const byMode = catalog.entries.find((entry) => entry.mode === mode);
+    if (byMode) {
+      return { brand: byMode.brand, mode: byMode.mode };
+    }
+  }
+
+  if (catalog.default) {
+    return { ...catalog.default };
+  }
+
+  const first = catalog.entries[0];
+  return first ? { brand: first.brand, mode: first.mode } : undefined;
+}
+
+async function resolveFigmaPreviewTheme(
+  node: SceneNode,
+  themeCatalog?: ThemeCatalog | null,
+): Promise<PreviewThemeContext | undefined> {
+  const modeMap = await collectFigmaVariableModes(node);
+  const partial: Partial<ThemeSelection> = {};
+
+  for (const [collectionId, modeId] of modeMap) {
+    try {
+      const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+      if (!collection) {
+        continue;
+      }
+      const mode = collection.modes.find((entry) => entry.modeId === modeId);
+      if (!mode) {
+        continue;
+      }
+
+      const kind = classifyThemeCollection(collection.name);
+      const modeSlug = slugThemeToken(mode.name);
+      if (kind === "brand") {
+        partial.brand = modeSlug;
+      } else if (kind === "mode") {
+        partial.mode = modeSlug;
+      } else if (themeCatalog?.entries.some((entry) => entry.brand === modeSlug)) {
+        partial.brand = modeSlug;
+      } else if (themeCatalog?.entries.some((entry) => entry.mode === modeSlug)) {
+        partial.mode = modeSlug;
+      }
+    } catch {
+      // Variable API unavailable in this context.
+    }
+  }
+
+  return alignPreviewThemeWithCatalog(themeCatalog, partial);
+}
+
 function getPushSelectionError(): string | null {
   const selection = figma.currentPage.selection;
 
@@ -1285,14 +1414,26 @@ function hasValidPushSelection(): boolean {
 }
 
 function postSelectionState(): void {
+  void postSelectionStateAsync();
+}
+
+async function postSelectionStateAsync(): Promise<void> {
   const selection = figma.currentPage.selection;
   const node = selection.length === 1 ? selection[0]! : null;
+  const connection = (await figma.clientStorage.getAsync(STORAGE_KEYS.connection)) as
+    | PluginConnection
+    | undefined;
+  const previewTheme =
+    node && hasValidPushSelection()
+      ? await resolveFigmaPreviewTheme(node, connection?.syncConfig?.themes)
+      : undefined;
 
   figma.ui.postMessage({
     type: "selection-changed",
     hasValidSelection: hasValidPushSelection(),
     selectionId: node?.id ?? null,
     selectionName: node?.name ?? null,
+    previewTheme,
   });
 
   scheduleResolveComponent(node);
@@ -1399,6 +1540,12 @@ async function ensureExistingPreview(msg: {
 
   const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
 
+  const selectionNode = figma.currentPage.selection[0];
+  const themeSelection =
+    selectionNode && selectionNode.id === msg.selectionId
+      ? await resolveFigmaPreviewTheme(selectionNode, connection.syncConfig.themes)
+      : undefined;
+
   try {
     const previewRes = await fetch(`${apiBase}/preview/existing`, {
       method: "POST",
@@ -1416,6 +1563,8 @@ async function ensureExistingPreview(msg: {
           connection.syncConfig.web?.tokenPaths ??
           connection.syncConfig.tokens?.tokenPaths ??
           connection.detected.tokenPaths,
+        themeCatalog: connection.syncConfig.themes,
+        themeSelection,
       }),
     });
 

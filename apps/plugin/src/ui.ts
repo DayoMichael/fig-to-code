@@ -5,6 +5,7 @@ import {
   type PreviewPropControl,
 } from "@fig2code/codegen/preview-utils";
 import { inferBreakingFromText, inferFixFromText } from "@fig2code/codegen/change-summary";
+import type { PreviewThemeContext, ThemeCatalog, ThemeSelection } from "@fig2code/spec";
 import {
   PREVIEW_ICON_CLOSE,
   PREVIEW_ICON_CODE,
@@ -74,6 +75,9 @@ const buildPreviewControlsEl = document.getElementById("build-preview-controls")
 const previewSelectGroupEl = document.getElementById("preview-select-group")!;
 const previewInputGroupEl = document.getElementById("preview-input-group")!;
 const previewBooleanGroupEl = document.getElementById("preview-boolean-group")!;
+const previewThemeGroupEl = document.getElementById("preview-theme-group")!;
+const previewThemeBrandEl = document.getElementById("preview-theme-brand") as HTMLSelectElement;
+const previewThemeModeEl = document.getElementById("preview-theme-mode") as HTMLSelectElement;
 const buildPreviewCardEl = buildPreviewSection.querySelector(".build-preview-card") as HTMLElement;
 const previewWorkflowEl = document.getElementById("preview-workflow")!;
 const previewActionBarEl = document.getElementById("preview-action-bar")!;
@@ -151,6 +155,11 @@ let currentPreviewUrl: string | null = null;
 let currentPreviewJobId: string | null = null;
 let selectedPreviewArgs: Record<string, unknown> = {};
 let existingPreviewSessionId: string | null = null;
+let currentThemeCatalog: ThemeCatalog | null = null;
+let figmaPreviewTheme: PreviewThemeContext | undefined;
+let selectedPreviewTheme: ThemeSelection | null = null;
+let themeUpdateInFlight = false;
+let suppressThemeChangeHandler = false;
 let correctionStreamTimer: ReturnType<typeof setInterval> | null = null;
 let activeStreamJobId: string | null | "pending" = null;
 let preservePreviewDuringJob = false;
@@ -1981,6 +1990,134 @@ function appendPreviewInputControl(
   container.appendChild(field);
 }
 
+function listThemeBrands(catalog: ThemeCatalog): string[] {
+  return [...new Set(catalog.entries.map((entry) => entry.brand))].sort();
+}
+
+function listThemeModes(catalog: ThemeCatalog, brand?: string): string[] {
+  const entries = brand
+    ? catalog.entries.filter((entry) => entry.brand === brand)
+    : catalog.entries;
+  return [...new Set(entries.map((entry) => entry.mode))].sort();
+}
+
+function resolveActivePreviewTheme(): ThemeSelection | null {
+  if (selectedPreviewTheme) {
+    return selectedPreviewTheme;
+  }
+  if (figmaPreviewTheme?.brand && figmaPreviewTheme.mode) {
+    return { brand: figmaPreviewTheme.brand, mode: figmaPreviewTheme.mode };
+  }
+  if (currentThemeCatalog?.default) {
+    return { ...currentThemeCatalog.default };
+  }
+  const first = currentThemeCatalog?.entries[0];
+  return first ? { brand: first.brand, mode: first.mode } : null;
+}
+
+function formatThemeLabel(value: string): string {
+  return value
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function syncPreviewControlsPanelVisibility(hasVariantControls: boolean): void {
+  const hasThemeControls = Boolean(currentThemeCatalog?.entries.length);
+  buildPreviewControlsEl.classList.toggle("hidden", !hasVariantControls && !hasThemeControls);
+  previewThemeGroupEl.classList.toggle("hidden", !hasThemeControls);
+}
+
+function renderThemeControls(): void {
+  const catalog = currentThemeCatalog;
+  if (!catalog?.entries.length) {
+    previewThemeGroupEl.classList.add("hidden");
+    return;
+  }
+
+  const brands = listThemeBrands(catalog);
+  const active = resolveActivePreviewTheme();
+  const brand =
+    active?.brand && brands.includes(active.brand) ? active.brand : brands[0]!;
+  const modes = listThemeModes(catalog, brand);
+  const mode = active?.mode && modes.includes(active.mode) ? active.mode : modes[0]!;
+
+  suppressThemeChangeHandler = true;
+  previewThemeBrandEl.innerHTML = brands
+    .map((entry) => `<option value="${entry}">${formatThemeLabel(entry)}</option>`)
+    .join("");
+  previewThemeBrandEl.value = brand;
+  previewThemeModeEl.innerHTML = modes
+    .map((entry) => `<option value="${entry}">${formatThemeLabel(entry)}</option>`)
+    .join("");
+  previewThemeModeEl.value = mode;
+  suppressThemeChangeHandler = false;
+
+  selectedPreviewTheme = { brand, mode };
+  previewThemeGroupEl.classList.remove("hidden");
+}
+
+async function applyPreviewThemeChange(reloadPreview = true): Promise<void> {
+  if (suppressThemeChangeHandler || themeUpdateInFlight || !currentThemeCatalog) {
+    return;
+  }
+
+  const brand = previewThemeBrandEl.value;
+  const mode = previewThemeModeEl.value;
+  selectedPreviewTheme = { brand, mode };
+
+  const sessionId = currentPreviewJobId;
+  if (!sessionId || !currentPreviewUrl) {
+    return;
+  }
+
+  themeUpdateInFlight = true;
+  try {
+    const url = existingPreviewSessionId
+      ? `${apiBase}/preview/existing/${sessionId}/theme`
+      : `${apiBase}/jobs/${sessionId}/preview/theme`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brand, mode }),
+    });
+    if (!res.ok) {
+      return;
+    }
+
+    if (reloadPreview) {
+      const baseUrl = currentPreviewUrl.split("?")[0] ?? currentPreviewUrl;
+      const reloadUrl = withPreviewReloadToken(baseUrl, currentBuildPreview?.componentName);
+      currentPreviewUrl = reloadUrl;
+      reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
+      if (!previewModalEl.classList.contains("hidden")) {
+        reloadPreviewFrame(previewModalFrameEl, reloadUrl);
+      }
+    }
+  } finally {
+    themeUpdateInFlight = false;
+  }
+}
+
+previewThemeBrandEl.onchange = () => {
+  if (suppressThemeChangeHandler || !currentThemeCatalog) {
+    return;
+  }
+  const modes = listThemeModes(currentThemeCatalog, previewThemeBrandEl.value);
+  suppressThemeChangeHandler = true;
+  previewThemeModeEl.innerHTML = modes
+    .map((entry) => `<option value="${entry}">${formatThemeLabel(entry)}</option>`)
+    .join("");
+  previewThemeModeEl.value = modes[0] ?? "";
+  suppressThemeChangeHandler = false;
+  void applyPreviewThemeChange();
+};
+
+previewThemeModeEl.onchange = () => {
+  void applyPreviewThemeChange();
+};
+
 function renderPreviewControls(preview: BuildPreview) {
   buildPreviewSelectControlsEl.innerHTML = "";
   buildPreviewInputControlsEl.innerHTML = "";
@@ -1991,13 +2128,14 @@ function renderPreviewControls(preview: BuildPreview) {
   const propControls = preview.propControls ?? [];
   const hasAnyControls = Object.keys(axes).length > 0 || propControls.length > 0;
 
-  buildPreviewControlsEl.classList.toggle("hidden", !hasAnyControls);
   buildPreviewVariantEl.classList.toggle("hidden", hasAnyControls);
   if (!hasAnyControls) {
     buildPreviewVariantEl.textContent = preview.variantLabel;
     previewSelectGroupEl.classList.add("hidden");
     previewInputGroupEl.classList.add("hidden");
     previewBooleanGroupEl.classList.add("hidden");
+    syncPreviewControlsPanelVisibility(false);
+    renderThemeControls();
     return;
   }
 
@@ -2057,6 +2195,8 @@ function renderPreviewControls(preview: BuildPreview) {
   previewSelectGroupEl.classList.toggle("hidden", selectCount === 0);
   previewInputGroupEl.classList.toggle("hidden", inputCount === 0);
   previewBooleanGroupEl.classList.toggle("hidden", booleanCount === 0);
+  syncPreviewControlsPanelVisibility(true);
+  renderThemeControls();
 
   if (currentPreviewUrl) {
     postPreviewArgsToFrame(buildPreviewFrameEl);
@@ -2154,6 +2294,8 @@ function resetPreviewForSelectionChange() {
   previewSelectGroupEl.classList.add("hidden");
   previewInputGroupEl.classList.add("hidden");
   previewBooleanGroupEl.classList.add("hidden");
+  previewThemeGroupEl.classList.add("hidden");
+  selectedPreviewTheme = null;
   buildPreviewVariantEl.classList.remove("hidden");
   syncPreviewStoryNotice(null);
   setPreviewFrame(buildPreviewFrameEl, buildPreviewEmptyEl, null);
@@ -2919,6 +3061,7 @@ function webTokenPaths(web?: { tokenPaths?: string[]; tokenPath?: string }): str
 }
 
 function fillSetupForm(connection: ConnectionPayload) {
+  currentThemeCatalog = (connection.syncConfig?.themes as ThemeCatalog | undefined) ?? null;
   const web = connection.syncConfig?.web as
     | {
         styleSystem?: string;
@@ -3429,6 +3572,8 @@ window.onmessage = (event: MessageEvent) => {
   if (msg.type === "selection-changed") {
     const nextSelectionId = typeof msg.selectionId === "string" ? msg.selectionId : null;
     hasValidSelection = Boolean(msg.hasValidSelection);
+    figmaPreviewTheme = msg.previewTheme as PreviewThemeContext | undefined;
+    selectedPreviewTheme = null;
 
     if (
       lastValidatedSelectionId &&

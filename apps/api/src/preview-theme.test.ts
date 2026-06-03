@@ -34,7 +34,7 @@ test("resolvePreviewTheme loads token CSS and tailwind color config", async () =
     const theme = await resolvePreviewTheme(
       root,
       "packages/ui/src/components/ui/inline-alert.tsx",
-      ["packages/ui/tokens"],
+      { tokenPaths: ["packages/ui/tokens"] },
     );
 
     assert.ok(theme);

@@ -1,10 +1,17 @@
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import type { ThemeCatalog, ThemeSelection } from "@fig2code/spec";
+import {
+  buildThemeHtmlAttributes,
+  discoverThemeCatalog,
+  resolveThemeCatalogEntry,
+} from "@fig2code/repo";
 
 export interface PreviewThemeBundle {
   css: string;
   tailwindConfigJson: string;
   htmlAttrs: Record<string, string>;
+  selection: ThemeSelection;
 }
 
 function toPosixRelative(from: string, to: string): string {
@@ -107,50 +114,6 @@ async function findPackageRoot(
   return null;
 }
 
-async function resolveTokensDir(
-  repoClonePath: string,
-  packageRoot: string,
-  tokenPaths?: string[],
-): Promise<string | null> {
-  for (const tokenPath of tokenPaths ?? []) {
-    const candidate = path.join(repoClonePath, tokenPath);
-    if (await fileExists(path.join(candidate, "primitives.css"))) {
-      return candidate;
-    }
-    if (await fileExists(candidate) && candidate.endsWith(".css")) {
-      return path.dirname(candidate);
-    }
-  }
-
-  const packageTokens = path.join(packageRoot, "tokens");
-  if (await fileExists(path.join(packageTokens, "primitives.css"))) {
-    return packageTokens;
-  }
-
-  return null;
-}
-
-async function pickThemeCss(tokensDir: string): Promise<string | null> {
-  const preferred = path.join(tokensDir, "theme-retail-light.css");
-  if (await fileExists(preferred)) {
-    return preferred;
-  }
-
-  try {
-    const files = await readdir(tokensDir);
-    const themeFile = files.find(
-      (name) => name.startsWith("theme-") && name.endsWith("-light.css"),
-    );
-    if (themeFile) {
-      return path.join(tokensDir, themeFile);
-    }
-  } catch {
-    // ignored
-  }
-
-  return null;
-}
-
 async function readOptional(filePath: string): Promise<string> {
   try {
     return await readFile(filePath, "utf-8");
@@ -159,61 +122,86 @@ async function readOptional(filePath: string): Promise<string> {
   }
 }
 
+async function resolveCatalog(
+  repoClonePath: string,
+  tokenPaths: string[] | undefined,
+  themeCatalog?: ThemeCatalog | null,
+): Promise<ThemeCatalog | null> {
+  if (themeCatalog?.entries.length) {
+    return themeCatalog;
+  }
+  return discoverThemeCatalog(repoClonePath, tokenPaths ?? []);
+}
+
+export function isDarkPreviewMode(mode: string | undefined): boolean {
+  return Boolean(mode && /dark|night|dim/i.test(mode));
+}
+
 /**
- * Load design-token CSS and Tailwind CDN config for existing component previews.
+ * Load design-token CSS and Tailwind CDN config for preview using the selected brand/mode.
  */
 export async function resolvePreviewTheme(
   repoClonePath: string,
   componentRepoPath: string,
-  tokenPaths?: string[],
+  options: {
+    tokenPaths?: string[];
+    themeCatalog?: ThemeCatalog | null;
+    selection?: Partial<ThemeSelection>;
+  } = {},
 ): Promise<PreviewThemeBundle | null> {
+  const catalog = await resolveCatalog(
+    repoClonePath,
+    options.tokenPaths,
+    options.themeCatalog,
+  );
+  if (!catalog?.tokensDir) {
+    return null;
+  }
+
+  const entry = resolveThemeCatalogEntry(catalog, options.selection);
+  if (!entry) {
+    return null;
+  }
+
+  const tokensDir = path.join(repoClonePath, catalog.tokensDir);
+  const themeCssPath = path.join(tokensDir, entry.cssFile);
+  if (!(await fileExists(themeCssPath))) {
+    return null;
+  }
+
   const packageRoot = await findPackageRoot(repoClonePath, componentRepoPath);
-  if (!packageRoot) {
-    return null;
-  }
-
-  const tokensDir = await resolveTokensDir(repoClonePath, packageRoot, tokenPaths);
-  if (!tokensDir) {
-    return null;
-  }
-
-  const themeCssPath = await pickThemeCss(tokensDir);
-  if (!themeCssPath) {
-    return null;
-  }
-
   const cssParts = [
     await readOptional(path.join(tokensDir, "primitives.css")),
     await readOptional(themeCssPath),
-    await readOptional(path.join(packageRoot, "fonts.css")),
+    packageRoot ? await readOptional(path.join(packageRoot, "fonts.css")) : "",
   ].filter(Boolean);
 
   if (cssParts.length === 0) {
     return null;
   }
 
-  const colorPathsFile = path.join(
-    packageRoot,
-    "src/preset/color-token-paths.generated.json",
-  );
+  const colorPathsFile = packageRoot
+    ? path.join(packageRoot, "src/preset/color-token-paths.generated.json")
+    : null;
   let colorPaths: string[] = [];
-  try {
-    const raw = await readFile(colorPathsFile, "utf-8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) {
-      colorPaths = parsed.filter((entry): entry is string => typeof entry === "string");
+  if (colorPathsFile) {
+    try {
+      const raw = await readFile(colorPathsFile, "utf-8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        colorPaths = parsed.filter((value): value is string => typeof value === "string");
+      }
+    } catch {
+      // fall back to CSS-only injection
     }
-  } catch {
-    // fall back to CSS-only injection
   }
 
   const tailwindConfigJson =
-    colorPaths.length > 0
-      ? buildTailwindConfigFromColorPaths(colorPaths)
-      : "{}";
+    colorPaths.length > 0 ? buildTailwindConfigFromColorPaths(colorPaths) : "{}";
 
   console.log(
     `[fig2code] preview theme:`,
+    `${entry.brand}/${entry.mode}`,
     toPosixRelative(repoClonePath, tokensDir),
     `${colorPaths.length} color paths`,
   );
@@ -221,9 +209,16 @@ export async function resolvePreviewTheme(
   return {
     css: cssParts.join("\n\n"),
     tailwindConfigJson,
-    htmlAttrs: {
-      "data-brand": "retail",
-      "data-theme": "light",
-    },
+    htmlAttrs: buildThemeHtmlAttributes(catalog, entry),
+    selection: { brand: entry.brand, mode: entry.mode },
   };
+}
+
+export async function listAvailableThemeCssFiles(tokensDir: string): Promise<string[]> {
+  try {
+    const files = await readdir(tokensDir);
+    return files.filter((name) => /^theme-.+\.css$/i.test(name)).sort();
+  } catch {
+    return [];
+  }
 }

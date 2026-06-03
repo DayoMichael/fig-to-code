@@ -47,4 +47,12 @@ export {
   buildStoryFileCandidates,
   canonicalComponentNameFromPath,
 } from "./resolve-component.js";
+export {
+  discoverThemeCatalog,
+  resolveThemeCatalogEntry,
+  buildThemeHtmlAttributes,
+  listThemeBrands,
+  listThemeModes,
+  slugThemeToken,
+} from "./theme-catalog.js";
 export type { ResolveComponentInput, ResolveFileReader } from "./resolve-component.js";

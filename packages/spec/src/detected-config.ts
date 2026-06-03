@@ -1,3 +1,5 @@
+import type { ThemeCatalog } from "./themes.js";
+
 export type StyleSystem =
   | "tailwind"
   | "css-modules"
@@ -49,6 +51,7 @@ export interface DetectedProjectConfig {
   testFramework: TestFramework;
   storyFormat: StoryFormat;
   formatter: FormatterPreference;
+  themeCatalog?: ThemeCatalog | null;
   hasCodeConnect: boolean;
   platforms: Platform[];
   existingComponents: ExistingComponentSummary[];

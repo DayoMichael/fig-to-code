@@ -10,6 +10,7 @@ import type {
 } from "./detected-config.js";
 import type { TypographyConfig } from "./typography.js";
 import type { TokenConfig } from "./tokens.js";
+import type { ThemeCatalog } from "./themes.js";
 
 export type GitHostProvider = "github" | "bitbucket" | "gitlab";
 
@@ -83,5 +84,6 @@ export interface SyncConfig {
   conventions: ConventionsConfig;
   typography?: TypographyConfig;
   tokens?: TokenConfig;
+  themes?: ThemeCatalog;
   llm?: LlmConfig;
 }

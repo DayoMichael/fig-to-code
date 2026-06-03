@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile as readFs, writeFile, rm, access } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import path from "node:path";
-import type { JobBuildPreview, TokenCatalog, VcsConfig, FormatterPreference } from "@fig2code/spec";
+import type { JobBuildPreview, TokenCatalog, VcsConfig, FormatterPreference, ThemeCatalog, ThemeSelection } from "@fig2code/spec";
 import {
   extractComponentName,
   isDefaultExport,
@@ -30,7 +30,7 @@ import {
   resolveStorybookHarnessSupport,
   sanitizeStorybookHarnessDependencies,
 } from "./storybook-harness.js";
-import { resolvePreviewTheme, type PreviewThemeBundle } from "./preview-theme.js";
+import { resolvePreviewTheme, isDarkPreviewMode, type PreviewThemeBundle } from "./preview-theme.js";
 
 export interface PreviewSession {
   jobId: string;
@@ -50,6 +50,16 @@ export interface PreviewSession {
   harnessConfigKey?: string;
   /** True while an intentional vite restart is in progress (ignore exit events). */
   restartingVite?: boolean;
+  themeSelection?: ThemeSelection;
+  harnessContext?: PreviewHarnessContext;
+}
+
+interface PreviewHarnessContext {
+  buildPreview: JobBuildPreview;
+  componentName: string;
+  componentRepoPath: string;
+  useDefault: boolean;
+  config: PreviewSessionConfig;
 }
 
 export interface PreviewSessionConfig {
@@ -58,6 +68,9 @@ export interface PreviewSessionConfig {
   gitToken: string;
   atlassianEmail?: string;
   formatter?: FormatterPreference;
+  tokenPaths?: string[];
+  themeCatalog?: ThemeCatalog | null;
+  themeSelection?: Partial<ThemeSelection>;
 }
 
 export interface StartExistingOptions {
@@ -69,6 +82,8 @@ export interface StartExistingOptions {
   atlassianEmail?: string;
   tokenCatalog?: TokenCatalog;
   tokenPaths?: string[];
+  themeCatalog?: ThemeCatalog | null;
+  themeSelection?: Partial<ThemeSelection>;
 }
 
 export interface OpenExistingPreviewResult {
@@ -94,6 +109,10 @@ interface SessionManager {
   stopSession(jobId: string): Promise<void>;
   getSession(jobId: string): PreviewSession | undefined;
   writeFile(jobId: string, filePath: string, content: string): Promise<void>;
+  updatePreviewTheme(
+    jobId: string,
+    selection: Partial<ThemeSelection>,
+  ): Promise<ThemeSelection | null>;
   stopAll(): Promise<void>;
 }
 
@@ -465,6 +484,13 @@ function generateIndexHtml(
     : "";
 
   const htmlOpenTag = formatHtmlOpenTag(theme?.htmlAttrs ?? {});
+  const isDark = isDarkPreviewMode(theme?.selection.mode);
+  const shellBg = isDark ? "#0b1220" : "#f8fafc";
+  const shellText = isDark ? "#e5e7eb" : "#111827";
+  const frameBg = isDark ? "#111827" : "#ffffff";
+  const frameBorder = isDark ? "#374151" : "#e5e7eb";
+  const toolbarBg = isDark ? "#1f2937" : "#fcfcfd";
+  const mutedText = isDark ? "#9ca3af" : "#6b7280";
 
   return `<!DOCTYPE html>
 <html ${htmlOpenTag}>
@@ -475,13 +501,13 @@ function generateIndexHtml(
     <script src="https://cdn.tailwindcss.com"></script>${tailwindConfigScript}
     <style>
       :root {
-        color-scheme: light;
+        color-scheme: ${isDark ? "dark" : "light"};
         font-family: Inter, system-ui, sans-serif;
       }${combinedTokenCss ? `\n${indentCss(combinedTokenCss, 6)}` : ""}
       body {
         margin: 0;
-        background: #f8fafc;
-        color: #111827;
+        background: ${shellBg};
+        color: ${shellText};
       }
       .preview-shell {
         min-height: 100vh;
@@ -491,10 +517,10 @@ function generateIndexHtml(
       .preview-frame {
         max-width: 760px;
         margin: 0 auto;
-        background: #ffffff;
-        border: 1px solid #e5e7eb;
+        background: ${frameBg};
+        border: 1px solid ${frameBorder};
         border-radius: 14px;
-        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+        box-shadow: 0 10px 30px rgba(15, 23, 42, ${isDark ? "0.35" : "0.06"});
         overflow: hidden;
       }
       .preview-toolbar {
@@ -502,13 +528,13 @@ function generateIndexHtml(
         justify-content: space-between;
         gap: 12px;
         padding: 12px 16px;
-        border-bottom: 1px solid #e5e7eb;
-        background: #fcfcfd;
+        border-bottom: 1px solid ${frameBorder};
+        background: ${toolbarBg};
         font-size: 11px;
-        color: #6b7280;
+        color: ${mutedText};
       }
       .preview-toolbar strong {
-        color: #111827;
+        color: ${shellText};
         font-size: 12px;
       }
       .preview-canvas {
@@ -1189,6 +1215,11 @@ export function createPreviewSessionManager(
       buildPreview,
       previewHarness,
     );
+    const previewTheme = await resolvePreviewTheme(repoClonePath, componentRepoPath, {
+      tokenPaths: config.tokenPaths,
+      themeCatalog: config.themeCatalog,
+      selection: config.themeSelection,
+    });
 
     const harnessFiles: Array<[string, string]> = [
       [
@@ -1214,7 +1245,7 @@ export function createPreviewSessionManager(
       ],
       [
         path.join(harnessPath, "index.html"),
-        generateIndexHtml(buildPreview, componentName, config),
+        generateIndexHtml(buildPreview, componentName, config, previewTheme),
       ],
       [
         path.join(harnessPath, "main.tsx"),
@@ -1278,6 +1309,16 @@ export function createPreviewSessionManager(
       lastAccessedAt: Date.now(),
       ready: true,
       generatedFiles,
+      componentPath: componentRepoPath,
+      componentName,
+      themeSelection: previewTheme?.selection,
+      harnessContext: {
+        buildPreview,
+        componentName,
+        componentRepoPath,
+        useDefault,
+        config,
+      },
     };
     attachViteExitHandler(session);
 
@@ -1368,7 +1409,11 @@ export function createPreviewSessionManager(
     const previewTheme = await resolvePreviewTheme(
       repoClonePath,
       ctx.componentRepoPath,
-      options.tokenPaths,
+      {
+        tokenPaths: options.tokenPaths,
+        themeCatalog: options.themeCatalog,
+        selection: options.themeSelection,
+      },
     );
     const mainModuleSrc =
       mode === "swap" ? `/main.tsx?v=${Date.now()}` : "/main.tsx";
@@ -1594,6 +1639,28 @@ export function createPreviewSessionManager(
       componentPath: ctx.componentRepoPath,
       componentName: ctx.componentName,
       harnessConfigKey: configKey,
+      themeSelection: (
+        await resolvePreviewTheme(repoClonePath, ctx.componentRepoPath, {
+          tokenPaths: options.tokenPaths,
+          themeCatalog: options.themeCatalog,
+          selection: options.themeSelection,
+        })
+      )?.selection,
+      harnessContext: {
+        buildPreview: ctx.buildPreview,
+        componentName: ctx.componentName,
+        componentRepoPath: ctx.componentRepoPath,
+        useDefault: ctx.useDefault,
+        config: {
+          vcs: options.vcs,
+          gitToken: options.gitToken,
+          atlassianEmail: options.atlassianEmail,
+          tokenCatalog: options.tokenCatalog,
+          tokenPaths: options.tokenPaths,
+          themeCatalog: options.themeCatalog,
+          themeSelection: options.themeSelection,
+        },
+      },
     };
     attachViteExitHandler(session);
 
@@ -1676,6 +1743,31 @@ export function createPreviewSessionManager(
       session.componentPath = ctx.componentRepoPath;
       session.componentName = ctx.componentName;
       session.lastAccessedAt = Date.now();
+      const previewTheme = await resolvePreviewTheme(
+        session.repoClonePath,
+        ctx.componentRepoPath,
+        {
+          tokenPaths: options.tokenPaths,
+          themeCatalog: options.themeCatalog,
+          selection: options.themeSelection,
+        },
+      );
+      session.themeSelection = previewTheme?.selection;
+      session.harnessContext = {
+        buildPreview: ctx.buildPreview,
+        componentName: ctx.componentName,
+        componentRepoPath: ctx.componentRepoPath,
+        useDefault: ctx.useDefault,
+        config: {
+          vcs: options.vcs,
+          gitToken: options.gitToken,
+          atlassianEmail: options.atlassianEmail,
+          tokenCatalog: options.tokenCatalog,
+          tokenPaths: options.tokenPaths,
+          themeCatalog: options.themeCatalog,
+          themeSelection: options.themeSelection,
+        },
+      };
 
       if (isViteProcessAlive(session) && (await waitForViteResponding(session))) {
         session.ready = true;
@@ -1762,6 +1854,46 @@ export function createPreviewSessionManager(
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
+  async function updatePreviewTheme(
+    jobId: string,
+    selection: Partial<ThemeSelection>,
+  ): Promise<ThemeSelection | null> {
+    const session = sessions.get(jobId);
+    if (!session?.harnessContext) {
+      throw new Error(`No active preview session for job ${jobId}`);
+    }
+
+    session.lastAccessedAt = Date.now();
+    const ctx = session.harnessContext;
+    const previewTheme = await resolvePreviewTheme(
+      session.repoClonePath,
+      ctx.componentRepoPath,
+      {
+        tokenPaths: ctx.config.tokenPaths,
+        themeCatalog: ctx.config.themeCatalog,
+        selection,
+      },
+    );
+    if (!previewTheme) {
+      return null;
+    }
+
+    await writeFile(
+      path.join(session.harnessPath, "index.html"),
+      generateIndexHtml(
+        ctx.buildPreview,
+        ctx.componentName,
+        ctx.config,
+        previewTheme,
+        `/main.tsx?v=${Date.now()}`,
+      ),
+      "utf-8",
+    );
+
+    session.themeSelection = previewTheme.selection;
+    return previewTheme.selection;
+  }
+
   return {
     startSession,
     startExistingSession,
@@ -1770,6 +1902,7 @@ export function createPreviewSessionManager(
     stopSession,
     getSession,
     writeFile: writeFileToWorkspace,
+    updatePreviewTheme,
     stopAll,
   };
 }

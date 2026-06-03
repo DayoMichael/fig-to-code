@@ -1,3 +1,5 @@
+import type { PreviewThemeContext } from "./themes.js";
+
 export type PrunedSlotType = "text" | "icon" | "instance" | "image";
 
 export interface PrunedSlot {
@@ -38,5 +40,7 @@ export interface PrunedSpec {
     figmaNodeId?: string;
     figmaComponentKey?: string;
     hash?: string;
+    /** Brand/mode inferred from Figma variable modes on the selection. */
+    previewTheme?: PreviewThemeContext;
   };
 }

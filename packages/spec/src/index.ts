@@ -1,6 +1,7 @@
 export * from "./detected-config.js";
 export * from "./sync-config.js";
 export * from "./registry.js";
+export * from "./themes.js";
 export * from "./pruned-spec.js";
 export * from "./typography.js";
 export * from "./tokens.js";
