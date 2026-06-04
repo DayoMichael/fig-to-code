@@ -45,6 +45,42 @@ function incomingPathFrom(requestUrl: string): string {
   return `${incoming.pathname}${incoming.search}`;
 }
 
+/**
+ * Re-stream Vite's response body while containing mid-stream failures. If the
+ * upstream socket dies (e.g. the Vite child is OOM-killed) or the client aborts,
+ * undici throws `terminated`/`UND_ERR_SOCKET`. Caught here, it just ends the
+ * stream cleanly instead of bubbling up as an unhandled rejection that could
+ * crash the whole API process.
+ */
+function guardedProxyStream(
+  upstream: ReadableStream<Uint8Array> | null,
+  label: string,
+): ReadableStream<Uint8Array> | null {
+  if (!upstream) return null;
+  const reader = upstream.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (err) {
+        console.warn(
+          `[fig2code] proxy stream aborted for ${label}:`,
+          err instanceof Error ? err.message : err,
+        );
+        controller.close();
+      }
+    },
+    cancel(reason) {
+      reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
 async function proxyToVite(
   c: Context,
   session: PreviewSession,
@@ -64,6 +100,9 @@ async function proxyToVite(
     const viteRes = await fetch(targetUrl, {
       method: c.req.method,
       headers: forwardHeaders,
+      // Forward the client's abort so a closed browser/iframe cleanly cancels
+      // the upstream request instead of leaving undici to throw "terminated".
+      signal: c.req.raw.signal,
     });
 
     const headers = new Headers();
@@ -82,7 +121,7 @@ async function proxyToVite(
       return new Response(errorBody, { status: viteRes.status, headers });
     }
 
-    return new Response(viteRes.body as ReadableStream, {
+    return new Response(guardedProxyStream(viteRes.body, incomingPathFrom(c.req.url)), {
       status: viteRes.status,
       headers,
     });
