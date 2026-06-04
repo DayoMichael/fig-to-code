@@ -121,6 +121,9 @@ const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const VITE_STARTUP_TIMEOUT_MS = Number(
   process.env.FIG2CODE_VITE_STARTUP_TIMEOUT_MS ?? 180_000,
 );
+const VITE_WARMUP_TIMEOUT_MS = Number(
+  process.env.FIG2CODE_VITE_WARMUP_TIMEOUT_MS ?? 120_000,
+);
 const PREVIEW_DIR = ".fig2code-preview";
 
 async function findFreePort(): Promise<number> {
@@ -376,8 +379,11 @@ function fig2codePreviewHarnessPlugin() {
     transformIndexHtml: {
       order: 'post',
       handler(html) {
+        // Match any <script …@vite/client…></script> regardless of attribute
+        // order or base-path prefix — the proxy can't tunnel the HMR socket, so
+        // the client must be fully removed to avoid endless WS-connect errors.
         return html.replace(
-          /<script type="module"[^>]*src="[^"]*@vite\\/client"[^>]*><\\/script>\\s*/g,
+          /<script\\b[^>]*@vite\\/client[^>]*><\\/script>\\s*/g,
           '',
         );
       },
@@ -818,9 +824,41 @@ async function harnessDepsInstalled(harnessPath: string): Promise<boolean> {
   }
 }
 
+/**
+ * Force Vite's first (cold) optimizeDeps + entry transform pass to happen
+ * server-side, before the browser ever loads the iframe. Otherwise that pass —
+ * which is multi-second on a cold/slow host with a large component library —
+ * runs on the browser's first request and blows past the client readiness
+ * timeout, surfacing as "Preview did not load …".
+ */
+async function warmUpVite(
+  previewUrl: string,
+  basePath: string,
+  logLabel: string,
+): Promise<void> {
+  const entry = `${previewUrl}${basePath}main.tsx`;
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(entry, {
+      signal: AbortSignal.timeout(VITE_WARMUP_TIMEOUT_MS),
+    });
+    // Drain the body so the transform fully completes before we report ready.
+    await res.text();
+    console.log(
+      `[fig2code] warmed vite for ${logLabel} in ${Date.now() - startedAt}ms (entry ${res.status})`,
+    );
+  } catch (err) {
+    console.warn(
+      `[fig2code] vite warm-up skipped for ${logLabel}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 async function startViteForHarness(
   harnessPath: string,
   logLabel: string,
+  basePath?: string,
 ): Promise<{ viteProcess: ChildProcess; previewUrl: string; vitePort: number }> {
   const port = await findFreePort();
   const viteBin = path.join(harnessPath, "node_modules", ".bin", "vite");
@@ -855,6 +893,9 @@ async function startViteForHarness(
   viteProcess.stdout?.destroy();
   viteProcess.stderr?.destroy();
   const previewUrl = `http://127.0.0.1:${actualPort}`;
+  if (basePath) {
+    await warmUpVite(previewUrl, basePath, logLabel);
+  }
   console.log(`[fig2code] preview ready at ${previewUrl} (${logLabel})`);
   return { viteProcess, previewUrl, vitePort: actualPort };
 }
@@ -1326,6 +1367,7 @@ export function createPreviewSessionManager(
     const started = await startViteForHarness(
       harnessPath,
       `job ${jobId}`,
+      `/jobs/${jobId}/preview/`,
     );
 
     const session: PreviewSession = {
@@ -1653,6 +1695,7 @@ export function createPreviewSessionManager(
     const started = await startViteForHarness(
       harnessPath,
       `existing component ${ctx.componentName}`,
+      `/preview/existing/${sessionId}/`,
     );
 
     const session: PreviewSession = {

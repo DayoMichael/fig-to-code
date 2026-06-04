@@ -171,6 +171,10 @@ let askComposerOpen = false;
 const PREVIEW_ARGS_MESSAGE = "fig2code-preview-args";
 const PREVIEW_READY_MESSAGE = "fig2code-preview-ready";
 const PREVIEW_ACTION_MESSAGE = "fig2code-preview-action";
+// The API warms Vite server-side before reporting ready, but on a cold/slow
+// deploy the browser's first render can still take a while — keep the readiness
+// window generous so we don't surface a false "did not load" error.
+const PREVIEW_READY_TIMEOUT_MS = 45000;
 
 type PreviewFile = {
   path: string;
@@ -1425,7 +1429,7 @@ function revealExistingPreview(sessionId: string, proxyUrl: string): void {
     buildPreviewEmptyEl.textContent =
       `Preview did not load for ${currentBuildPreview?.componentName ?? "component"}. ` +
       "Check that the API is running, then select the component again.";
-  }, 15000);
+  }, PREVIEW_READY_TIMEOUT_MS);
 
   setPreviewViewMode("preview");
   buildPreviewSection.classList.remove("hidden");
@@ -2405,7 +2409,7 @@ function showBuildPreview(preview: BuildPreview, jobId: string) {
     buildPreviewEmptyEl.textContent =
       `Preview did not load for ${preview.componentName}. ` +
       "Check that the API is running, then try Update with Figma again.";
-  }, 15000);
+  }, PREVIEW_READY_TIMEOUT_MS);
   setPreviewViewMode("preview");
   refreshCodeExplorers();
   buildPreviewSection.classList.remove("hidden");
