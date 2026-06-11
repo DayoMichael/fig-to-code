@@ -6,6 +6,7 @@ import { MODEL_CATALOG } from "@fig2code/llm";
 import { createReposRouter } from "./repos.js";
 import { createJobsRouter } from "./jobs.js";
 import { createRepoCloneCache } from "./repo-cache.js";
+import { startHealthWatchdog } from "./watchdog.js";
 
 // A mid-stream proxy failure (e.g. an OOM-killed Vite child closing its socket)
 // surfaces as an undici "terminated"/UND_ERR_SOCKET rejection. Log and keep the
@@ -57,6 +58,7 @@ const port = Number(process.env.PORT ?? 3000);
 if (import.meta.url === `file://${process.argv[1]}`) {
   serve({ fetch: app.fetch, port }, () => {
     console.log(`Fig2Code API listening on http://localhost:${port}`);
+    startHealthWatchdog({ port });
   });
 }
 

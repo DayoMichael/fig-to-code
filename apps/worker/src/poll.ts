@@ -29,7 +29,10 @@ export async function pollAndProcessOnce(
 }
 
 export async function runWorkerLoop(options: WorkerPollOptions = {}): Promise<never> {
-  const intervalMs = options.pollIntervalMs ?? Number(process.env.WORKER_POLL_MS ?? 500);
+  // Idle back-off between claim attempts. Kept short — this is dead time
+  // between a designer's click and the job being picked up. Override with
+  // WORKER_POLL_MS if the claim endpoint is remote/rate-limited.
+  const intervalMs = options.pollIntervalMs ?? Number(process.env.WORKER_POLL_MS ?? 200);
   const apiBase = options.apiBase ?? process.env.API_BASE ?? "http://localhost:3000";
 
   console.log(`Fig2Code worker polling ${apiBase} every ${intervalMs}ms when idle`);

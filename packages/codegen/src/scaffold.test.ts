@@ -289,4 +289,50 @@ describe("codegen scaffolds", () => {
 
     assert.equal(patches.length, 0);
   });
+
+  it("keeps append-export patches intact when no existing barrel is provided (create)", () => {
+    const appendPatch = buildPackageIndexAppendPatch(
+      planCodegenFiles(
+        kudaSyncConfig,
+        "InlineAlert",
+        "packages/ui/src/components/ui/inline-alert.tsx",
+      ),
+    );
+    // No existingFiles → create job. The patch must stay an append-export so the
+    // write/commit layer merges it into the real barrel instead of overwriting it.
+    const patches = finalizeBarrelExportPatches(
+      [{ path: "packages/ui/src/index.ts", action: "update", content: appendPatch }],
+      { componentName: "InlineAlert" },
+    );
+
+    assert.equal(patches.length, 1);
+    assert.match(patches[0]?.content ?? "", /fig2code:append-export/);
+    assert.match(patches[0]?.content ?? "", /export \{ InlineAlert, type InlineAlertProps \}/);
+  });
+
+  it("drops full package index rewrites on create jobs", () => {
+    const patches = sanitizeUpdateBarrelPatches(
+      [
+        {
+          path: "packages/ui/src/components/ui/inline-alert.tsx",
+          action: "create",
+          content: "export function InlineAlert() { return null; }",
+        },
+        {
+          path: "packages/ui/src/index.ts",
+          action: "update",
+          content: "export { InlineAlert } from './components/ui/inline-alert';",
+        },
+      ],
+      {
+        intent: "component",
+        componentName: "InlineAlert",
+        syncConfig: kudaSyncConfig,
+        packageIndexPath: "packages/ui/src/index.ts",
+      },
+    );
+
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0]?.path, "packages/ui/src/components/ui/inline-alert.tsx");
+  });
 });

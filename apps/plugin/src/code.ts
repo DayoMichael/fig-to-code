@@ -665,14 +665,25 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
   void pollJobUntilTerminal(apiBase, job.id);
 }
 
-const POLL_INTERVAL_MS = 750;
+// Poll fast at first (cache-hit jobs validate near-instantly), then back off
+// toward the old steady-state interval for genuinely slow LLM jobs.
+const POLL_INITIAL_INTERVAL_MS = 150;
+const POLL_MAX_INTERVAL_MS = 750;
+const POLL_BACKOFF_FACTOR = 1.5;
 const POLL_TIMEOUT_MS = 120_000;
 
 async function pollJobUntilTerminal(apiBase: string, jobId: string): Promise<void> {
   const started = Date.now();
+  let interval = POLL_INITIAL_INTERVAL_MS;
+  let firstPoll = true;
 
   for (;;) {
-    await sleep(POLL_INTERVAL_MS);
+    if (firstPoll) {
+      firstPoll = false;
+    } else {
+      await sleep(interval);
+      interval = Math.min(interval * POLL_BACKOFF_FACTOR, POLL_MAX_INTERVAL_MS);
+    }
     if (Date.now() - started > POLL_TIMEOUT_MS) {
       figma.ui.postMessage({
         type: "job-update",

@@ -303,6 +303,8 @@ function normalizeCodegenPatches(
     existingFiles: context.existingFiles,
     syncConfig: context.syncConfig,
     componentName: context.prunedSpec.name,
+    packageIndexPath: planCodegenFiles(context.syncConfig, context.prunedSpec.name)
+      .packageIndexPath,
   });
 
   const scaffolded = ensureCodegenScaffolds(

@@ -3,6 +3,12 @@ import { validatePrunedSpec } from "@fig2code/spec";
 import { buildJobPreview, runCodegen } from "@fig2code/codegen";
 import type { LLMProvider } from "@fig2code/llm";
 import { hydrateCodegenContext, type BundleResolver } from "./hydrate-context.js";
+import {
+  computeCodegenCacheKey,
+  getCachedCodegen,
+  setCachedCodegen,
+  type CachedCodegenResult,
+} from "./codegen-cache.js";
 
 export interface JobPatchClient {
   patchJob(jobId: string, patch: Partial<JobRecord>): Promise<JobRecord>;
@@ -33,6 +39,21 @@ export async function processJob(
     });
   }
 
+  // Repeat selections of an unchanged component produce an identical LLM
+  // request. Replay the prior validated result instead of re-running codegen,
+  // which keeps the model call off the per-click preview critical path.
+  const cacheKey = computeCodegenCacheKey(payload);
+  const cached = getCachedCodegen(cacheKey);
+  if (cached) {
+    return client.patchJob(payload.jobId, {
+      status: "validated",
+      patchCount: cached.patchCount,
+      codegenSummary: cached.codegenSummary,
+      changeSummary: cached.changeSummary,
+      buildPreview: cached.buildPreview,
+    });
+  }
+
   await client.patchJob(payload.jobId, { status: "codegen" });
 
   try {
@@ -54,14 +75,19 @@ export async function processJob(
       existingFiles: context.existingFiles,
     });
 
-    return client.patchJob(payload.jobId, {
-      status: "validated",
+    const validated: CachedCodegenResult = {
       patchCount: result.patches.length,
       codegenSummary:
         result.summary ??
         `Generated ${result.patches.length} patch(es) via ${context.syncConfig.llm?.modelId ?? "anthropic/claude-sonnet"}.`,
       changeSummary: result.changeSummary,
       buildPreview,
+    };
+    setCachedCodegen(cacheKey, validated);
+
+    return client.patchJob(payload.jobId, {
+      status: "validated",
+      ...validated,
     });
   } catch (error) {
     return client.patchJob(payload.jobId, {

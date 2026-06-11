@@ -218,7 +218,17 @@ export function finalizeBarrelExportPatches(
     const existingFile = options.existingFiles?.files.find(
       (file) => file.path === patch.path,
     );
-    const baseContent = existingFile?.content ?? "";
+    const baseContent = existingFile?.content;
+
+    // Without the existing barrel in hand (e.g. create jobs, where no bundle is
+    // loaded), keep the append-export patch as-is. Expanding it against empty
+    // content would overwrite the repo barrel with only the new export; instead
+    // the write/commit layer (appendExportPatchToFile /
+    // resolveAppendExportPatchesForCommit / the preview merge) appends it to the
+    // real file and preserves every existing export.
+    if (baseContent == null) {
+      return [patch];
+    }
 
     if (baseContent && packageIndexExportExists(baseContent, componentName)) {
       return [];
@@ -511,7 +521,12 @@ export { ${plan.componentName}, type ${plan.componentName}Props } from '${export
 
 const PACKAGE_INDEX_RE = /^packages\/[^/]+\/src\/index\.ts$/;
 
-/** Block full rewrites of package/barrel index files on component-update jobs. */
+/**
+ * Block full rewrites of package/barrel index files. On component-update jobs
+ * this protects every barrel known from the loaded bundle; on create jobs (no
+ * bundle) it protects the shared package index so a single new component can't
+ * wholesale-rewrite the repo barrel — only append-export patches survive.
+ */
 export function sanitizeUpdateBarrelPatches(
   patches: FilePatch[],
   options: {
@@ -522,44 +537,48 @@ export function sanitizeUpdateBarrelPatches(
     };
     syncConfig: SyncConfig;
     componentName: string;
+    /** The repo-wide barrel path, used to protect it on create jobs. */
+    packageIndexPath?: string;
   },
 ): FilePatch[] {
-  if (options.intent !== "component-update") {
-    return patches;
-  }
-
   const existingFiles = options.existingFiles;
-  if (!existingFiles?.files.length) {
+  const protectedPaths = new Set<string>();
+
+  if (options.intent === "component-update" && existingFiles?.files.length) {
+    for (const file of existingFiles.files) {
+      if (file.role === "barrel" || file.role === "related") {
+        protectedPaths.add(file.path);
+      }
+      if (PACKAGE_INDEX_RE.test(file.path)) {
+        protectedPaths.add(file.path);
+      }
+    }
+
+    const componentPath = existingFiles.files.find((file) => file.role === "component")
+      ?.path;
+    if (componentPath) {
+      const plan = planCodegenFiles(
+        options.syncConfig,
+        existingFiles.componentName ?? options.componentName,
+        componentPath,
+      );
+      if (plan.packageIndexPath) {
+        protectedPaths.add(plan.packageIndexPath);
+      }
+      if (plan.barrelPath) {
+        protectedPaths.add(plan.barrelPath);
+      }
+    }
+  } else if (options.packageIndexPath) {
+    // Create job (no bundle): guard the shared barrel from full rewrites.
+    protectedPaths.add(options.packageIndexPath);
+  }
+
+  if (protectedPaths.size === 0) {
     return patches;
   }
 
-  const protectedPaths = new Set<string>();
-  for (const file of existingFiles.files) {
-    if (file.role === "barrel" || file.role === "related") {
-      protectedPaths.add(file.path);
-    }
-    if (PACKAGE_INDEX_RE.test(file.path)) {
-      protectedPaths.add(file.path);
-    }
-  }
-
-  const componentPath = existingFiles.files.find((file) => file.role === "component")
-    ?.path;
-  if (componentPath) {
-    const plan = planCodegenFiles(
-      options.syncConfig,
-      existingFiles.componentName ?? options.componentName,
-      componentPath,
-    );
-    if (plan.packageIndexPath) {
-      protectedPaths.add(plan.packageIndexPath);
-    }
-    if (plan.barrelPath) {
-      protectedPaths.add(plan.barrelPath);
-    }
-  }
-
-  const componentName = existingFiles.componentName ?? options.componentName;
+  const componentName = existingFiles?.componentName ?? options.componentName;
 
   return patches.filter((patch) => {
     if (!protectedPaths.has(patch.path)) {
@@ -572,7 +591,7 @@ export function sanitizeUpdateBarrelPatches(
       return false;
     }
 
-    const existing = existingFiles.files.find((file) => file.path === patch.path);
+    const existing = existingFiles?.files.find((file) => file.path === patch.path);
     if (existing?.content && packageIndexExportExists(existing.content, componentName)) {
       return false;
     }

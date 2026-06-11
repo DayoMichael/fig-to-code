@@ -1454,8 +1454,10 @@ export function createPreviewSessionManager(
 
       session.ready = false;
       // App files are written; HMR is off, so the iframe fully reloads and Vite
-      // re-transforms the changed modules on the next request.
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      // re-transforms the changed modules on the next request. The short pause
+      // only needs to cover Vite's file-watcher invalidating its module cache —
+      // a local fs event, well under 100ms.
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       session.componentPath = prepared.componentRepoPath;
       session.componentName = prepared.componentName;

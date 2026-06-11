@@ -642,7 +642,6 @@ function previewLoadingHtml(componentName: string): string {
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="refresh" content="2" />
   <title>${componentName} · Starting preview…</title>
   <style>
     body {
@@ -675,6 +674,22 @@ function previewLoadingHtml(componentName: string): string {
     <div class="spinner"></div>
     <div>Setting up preview for ${componentName}…</div>
   </div>
+  <script>
+    // The preview endpoint serves this page while the session warms up and a
+    // 302 once it's ready. Probe for the redirect so the component appears the
+    // moment the server is ready, instead of waiting out a meta-refresh tick.
+    (function poll() {
+      fetch(location.href, { redirect: "manual", cache: "no-store" })
+        .then((res) => {
+          if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+            location.reload();
+            return;
+          }
+          setTimeout(poll, 300);
+        })
+        .catch(() => setTimeout(poll, 600));
+    })();
+  </script>
 </body>
 </html>`;
 }
