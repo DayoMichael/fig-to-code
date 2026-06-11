@@ -649,6 +649,14 @@ function collectPrDiffPatches(): Array<{ path: string; action: "create" | "updat
 
 function syncCreatePrButtonState() {
   flushCurrentEdit();
+  applyCreatePrButtonState();
+}
+
+// Recompute the Create PR button's enabled state from the *live* editor value
+// (canOpenPullRequest → buildEffectivePreviewSnapshot overlays the current
+// editor contents), without flushing/saving the edit. Safe to call on every
+// keystroke and from flushCurrentEdit without recursing.
+function applyCreatePrButtonState() {
   const onMain = isOnMainScreen();
 
   if (currentJobPrUrl) {
@@ -1780,6 +1788,7 @@ function flushCurrentEdit() {
     refreshEditedBadges();
     setSaveStatus("saved");
     hotReloadPreview();
+    applyCreatePrButtonState();
   }
 }
 
@@ -1859,6 +1868,10 @@ function handleCodeEditorInput(source: CodeExplorerElements) {
     setSaveStatus("saving");
   }
 
+  // Update the Create PR button immediately as the user types — the diff check
+  // reads the live editor value, so it can enable before the autosave fires.
+  applyCreatePrButtonState();
+
   if (autoSaveTimer) clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(() => {
     autoSaveTimer = null;
@@ -1869,6 +1882,7 @@ function handleCodeEditorInput(source: CodeExplorerElements) {
     refreshEditedBadges();
     setSaveStatus("saved");
     hotReloadPreview();
+    applyCreatePrButtonState();
   }, 800);
 }
 

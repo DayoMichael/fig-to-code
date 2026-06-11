@@ -855,6 +855,22 @@ async function warmUpVite(
   }
 }
 
+/**
+ * Continuously drain Vite's stdout/stderr to our log. Must keep reading for the
+ * life of the process — an unread pipe buffer fills and blocks the Vite child on
+ * its next write. Also surfaces Vite's own messages (notably mid-session dep
+ * re-optimization, which with HMR disabled is what silently breaks a live
+ * preview when swapping to a component that pulls in new dependencies).
+ */
+function forwardViteOutput(proc: ChildProcess, logLabel: string): void {
+  const forward = (chunk: Buffer) => {
+    const text = chunk.toString().trimEnd();
+    if (text) console.log(`[vite:${logLabel}] ${text}`);
+  };
+  proc.stdout?.on("data", forward);
+  proc.stderr?.on("data", forward);
+}
+
 async function startViteForHarness(
   harnessPath: string,
   logLabel: string,
@@ -890,8 +906,13 @@ async function startViteForHarness(
     } catch {}
     throw viteErr;
   }
-  viteProcess.stdout?.destroy();
-  viteProcess.stderr?.destroy();
+  // Keep draining Vite's output. waitForViteReady removed its own listeners, so
+  // if we stop reading, the OS pipe buffer (64KB) fills and the Vite child
+  // BLOCKS on its next write — e.g. when it logs a mid-session dep
+  // re-optimization — stalling the dev server and breaking the live preview.
+  // Forward to our log instead of destroying the pipes (destroying makes the
+  // child's next write hit a broken pipe → EPIPE → Vite errors out).
+  forwardViteOutput(viteProcess, logLabel);
   const previewUrl = `http://127.0.0.1:${actualPort}`;
   if (basePath) {
     await warmUpVite(previewUrl, basePath, logLabel);

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import type { EnqueueJobRequest, FilePatch, JobRecord } from "@fig2code/spec";
+import type { EnqueueJobRequest, FilePatch, JobRecord, VcsConfig } from "@fig2code/spec";
 import { GitHostApiError, formatGitHostApiError } from "@fig2code/git-host";
-import { openJobPullRequest } from "./open-job-pr.js";
+import { openJobPullRequest, openPullRequestFromPatches } from "./open-job-pr.js";
 import {
   createJobStore,
   type JobStore,
@@ -303,6 +303,81 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
           },
           status,
         );
+      }
+      return c.json(
+        { error: err instanceof Error ? err.message : "Failed to open pull request" },
+        500,
+      );
+    }
+  });
+
+  // Open a pull request directly from a set of patches, with no backing codegen
+  // job. Used by update mode when a designer manually edits an existing
+  // component and pushes those edits as a PR. The repo is the source of truth,
+  // so everything needed (vcs config, patches) comes in on the request.
+  app.post("/pull-request", async (c) => {
+    const gitToken = c.req.header("x-git-token")?.trim();
+    if (!gitToken) {
+      return c.json({ error: "x-git-token header is required" }, 400);
+    }
+
+    const body = (await c.req.json()) as {
+      vcs?: VcsConfig;
+      componentName?: string;
+      targetBranch?: string;
+      patches?: FilePatch[];
+      branchSuffix?: string;
+      formatter?: EnqueueJobRequest["syncConfig"]["conventions"]["formatter"];
+    };
+
+    if (!body.vcs?.provider) {
+      return c.json({ error: "vcs is required" }, 400);
+    }
+
+    const componentName = body.componentName?.trim();
+    if (!componentName) {
+      return c.json({ error: "componentName is required" }, 400);
+    }
+
+    if (!body.patches?.length) {
+      return c.json({ error: "patches are required" }, 400);
+    }
+
+    const targetBranch =
+      body.targetBranch?.trim() || body.vcs.defaultPrTarget || body.vcs.baseBranch;
+    if (!targetBranch) {
+      return c.json({ error: "targetBranch is required" }, 400);
+    }
+
+    const atlassianEmail = c.req.header("x-atlassian-email")?.trim() || undefined;
+
+    try {
+      const repoClonePath = await repoCache.getOrClone(body.vcs, gitToken, atlassianEmail);
+
+      const result = await openPullRequestFromPatches({
+        vcs: body.vcs,
+        auth: { token: gitToken, atlassianEmail },
+        componentName,
+        targetBranch,
+        patches: body.patches,
+        branchSuffix: body.branchSuffix?.trim() || `${componentName}-${targetBranch}`,
+        formatter: body.formatter,
+        repoClonePath,
+      });
+
+      console.log("[fig2code] manual pull request opened", {
+        component: componentName,
+        targetBranch,
+        headBranch: result.headBranch,
+        prUrl: result.prUrl,
+      });
+
+      return c.json({ prUrl: result.prUrl, prNumber: result.prNumber, headBranch: result.headBranch });
+    } catch (err) {
+      console.error("[fig2code] manual pull request failed", err);
+      if (err instanceof GitHostApiError) {
+        const status = err.status === 401 || err.status === 403 ? err.status : 502;
+        return c.json({ error: formatGitHostApiError(err, body.vcs.provider) }, status);
       }
       return c.json(
         { error: err instanceof Error ? err.message : "Failed to open pull request" },

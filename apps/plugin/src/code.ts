@@ -762,7 +762,30 @@ async function createPullRequest(msg: CreatePullRequestMessage): Promise<void> {
     throw new Error("Connect a repository before opening a pull request");
   }
 
-  throw new Error("Validated job id is required to open a pull request");
+  // No validated codegen job — this is update mode, where the designer manually
+  // edited an existing component. Open a PR straight from those edits.
+  if (!msg.patches?.length) {
+    throw new Error("No edits to include in the pull request");
+  }
+
+  const res = await fetch(`${apiBase}/pull-request`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      vcs: connection.vcs,
+      componentName: msg.componentName,
+      targetBranch: msg.targetBranch?.trim() || undefined,
+      patches: msg.patches,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(err.error ?? `Failed to open pull request (${res.status})`);
+  }
+
+  const result = (await res.json()) as { prUrl?: string };
+  figma.ui.postMessage({ type: "pull-request-opened", prUrl: result.prUrl });
 }
 
 function buildVcsFromMessage(msg: VcsFormMessage): VcsConfig {
