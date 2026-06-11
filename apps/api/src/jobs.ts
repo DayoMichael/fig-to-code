@@ -419,13 +419,14 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       return c.html(previewLoadingHtml(stored.buildPreview.componentName));
     }
 
-    return c.redirect(`/jobs/${c.req.param("id")}/preview/`, 302);
+    // Codegen sessions share one Vite server per repo under a stable base path;
+    // redirect there so asset URLs resolve regardless of which job triggered it.
+    return c.redirect(session.basePath ?? `/jobs/${c.req.param("id")}/preview/`, 302);
   });
 
+  // The proxy routes resolve by active session only (the id may be the stable
+  // base-path id of a reused session, not a currently-stored job).
   app.get("/jobs/:id/preview/", async (c) => {
-    const stored = store.getStored(c.req.param("id"));
-    if (!stored) return c.json({ error: "Not found" }, 404);
-
     const session = previewSessions.getSession(c.req.param("id"));
     if (!session) return c.json({ error: "No active preview session" }, 404);
 
@@ -433,9 +434,6 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   });
 
   app.all("/jobs/:id/preview/*", async (c) => {
-    const stored = store.getStored(c.req.param("id"));
-    if (!stored) return c.json({ error: "Not found" }, 404);
-
     const session = previewSessions.getSession(c.req.param("id"));
     if (!session) return c.json({ error: "No active preview session" }, 404);
 

@@ -665,7 +665,7 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
   void pollJobUntilTerminal(apiBase, job.id);
 }
 
-const POLL_INTERVAL_MS = 1500;
+const POLL_INTERVAL_MS = 750;
 const POLL_TIMEOUT_MS = 120_000;
 
 async function pollJobUntilTerminal(apiBase: string, jobId: string): Promise<void> {

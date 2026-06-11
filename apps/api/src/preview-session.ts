@@ -19,7 +19,7 @@ import {
   formatJobBuildPreview,
 } from "@fig2code/codegen";
 import { storyFormatLabel } from "@fig2code/codegen";
-import type { RepoCloneCache } from "./repo-cache.js";
+import { repoPreviewSessionId, type RepoCloneCache } from "./repo-cache.js";
 import { resolveHarnessTsConfig } from "./resolve-tsconfig.js";
 import { buildStoryFileCandidates } from "@fig2code/repo";
 import {
@@ -48,6 +48,10 @@ export interface PreviewSession {
   componentPath?: string;
   componentName?: string;
   harnessConfigKey?: string;
+  /** Hash of the harness dependency set; a change forces a cold start. */
+  harnessDepsKey?: string;
+  /** Stable preview base path the browser is redirected to (codegen sessions). */
+  basePath?: string;
   /** True while an intentional vite restart is in progress (ignore exit events). */
   restartingVite?: boolean;
   themeSelection?: ThemeSelection;
@@ -1185,6 +1189,177 @@ async function installHarnessDeps(harnessPath: string): Promise<void> {
   await writeFile(hashPath, pkgHash, "utf-8");
 }
 
+/** Stable hash of the harness dependency set (order-independent). */
+function stableHarnessDepsKey(deps: Record<string, string>): string {
+  const sorted = Object.keys(deps)
+    .sort()
+    .map((name) => `${name}@${deps[name]}`)
+    .join(",");
+  return createHash("sha256").update(sorted).digest("hex");
+}
+
+interface PreparedCodegenHarness {
+  buildPreview: JobBuildPreview;
+  generatedFiles: string[];
+  componentRepoPath: string;
+  componentName: string;
+  useDefault: boolean;
+  harnessConfigKey: string;
+  harnessDepsKey: string;
+  themeSelection?: ThemeSelection;
+}
+
+/**
+ * Write the generated component/story/patch files into the clone and the Vite
+ * harness files. In `"full"` mode all harness files are written (used on cold
+ * start). In `"swap"` mode only the app-level files (component sources +
+ * main.tsx + index.html) are rewritten — package.json/vite.config/tsconfig are
+ * left untouched so a running Vite server can be reused. `basePath` keeps the
+ * Vite base stable across reuse so asset URLs continue to resolve.
+ */
+async function prepareCodegenHarness(
+  repoClonePath: string,
+  harnessPath: string,
+  basePath: string,
+  buildPreview: JobBuildPreview,
+  config: PreviewSessionConfig,
+  mode: "full" | "swap",
+): Promise<PreparedCodegenHarness> {
+  buildPreview = await formatJobBuildPreview(buildPreview, {
+    formatter: config.formatter ?? "auto",
+    repoRoot: repoClonePath,
+    existingFiles: buildPreview.files?.map((file) => ({
+      path: file.path,
+      content: file.content,
+    })),
+  });
+
+  await mkdir(harnessPath, { recursive: true });
+
+  const componentContent = buildPreview.componentContent ?? "";
+  const storyContent = buildPreview.storyContent ?? "";
+  const componentName = buildPreview.componentName;
+  const exportName = extractComponentName(componentContent, componentName);
+  const useDefault = isDefaultExport(componentContent, exportName);
+  const componentRepoPath =
+    buildPreview.componentPath || `src/components/${componentName}.tsx`;
+
+  const generatedFiles: string[] = [];
+
+  if (componentContent) {
+    const fullPath = path.join(repoClonePath, componentRepoPath);
+    await mkdir(path.dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, sanitizeJsxStyleProps(componentContent), "utf-8");
+    generatedFiles.push(componentRepoPath);
+  }
+
+  if (storyContent && buildPreview.storyPath) {
+    const fullPath = path.join(repoClonePath, buildPreview.storyPath);
+    await mkdir(path.dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, sanitizeJsxStyleProps(storyContent), "utf-8");
+    generatedFiles.push(buildPreview.storyPath);
+  }
+
+  if (buildPreview.files) {
+    for (const file of buildPreview.files) {
+      if (file.action === "delete" || !file.content) continue;
+      if (file.path === componentRepoPath) continue;
+      if (file.path === buildPreview.storyPath) continue;
+      const fullPath = path.join(repoClonePath, file.path);
+      await mkdir(path.dirname(fullPath), { recursive: true });
+      let contentToWrite = sanitizeJsxStyleProps(file.content);
+      if (isAppendExportPatch(file.content)) {
+        let existing = "";
+        try {
+          existing = await readFs(fullPath, "utf-8");
+        } catch {
+          existing = "";
+        }
+        const merged = mergeAppendExportIntoContent(existing, file.content);
+        if (!merged) {
+          continue;
+        }
+        contentToWrite = sanitizeJsxStyleProps(merged);
+      }
+      await writeFile(fullPath, contentToWrite, "utf-8");
+      generatedFiles.push(file.path);
+    }
+  }
+
+  const previewHarness = await resolvePreviewHarnessContext(
+    repoClonePath,
+    componentRepoPath,
+    buildPreview,
+  );
+  const sbOptions = await resolveStorybookHarnessOptions(
+    repoClonePath,
+    harnessPath,
+    buildPreview,
+    previewHarness,
+  );
+  const previewTheme = await resolvePreviewTheme(repoClonePath, componentRepoPath, {
+    tokenPaths: config.tokenPaths,
+    themeCatalog: config.themeCatalog,
+    selection: config.themeSelection,
+  });
+
+  // On reuse, bust the entry module so the iframe reload pulls fresh transforms.
+  const mainModuleSrc = mode === "swap" ? `/main.tsx?v=${Date.now()}` : "/main.tsx";
+
+  const appFiles: Array<[string, string]> = [
+    [
+      path.join(harnessPath, "index.html"),
+      generateIndexHtml(buildPreview, componentName, config, previewTheme, mainModuleSrc),
+    ],
+    [
+      path.join(harnessPath, "main.tsx"),
+      generateMainTsx(buildPreview, componentName, useDefault, componentRepoPath, sbOptions),
+    ],
+  ];
+
+  const infraFiles: Array<[string, string]> =
+    mode === "full"
+      ? [
+          [
+            path.join(harnessPath, "package.json"),
+            generateHarnessPackageJson(previewHarness.harnessDependencies),
+          ],
+          [
+            path.join(harnessPath, "vite.config.ts"),
+            generateHarnessViteConfig(
+              basePath,
+              previewHarness.viteAliases,
+              previewHarness.harnessConfig.reactModules,
+              previewHarness.dependencyAliases,
+              previewHarness.storybook?.optimizeIncludes ?? [],
+            ),
+          ],
+          [
+            path.join(harnessPath, "tsconfig.json"),
+            generateHarnessTsConfig({
+              paths: previewHarness.harnessConfig.tsPaths,
+              include: previewHarness.tsInclude,
+            }),
+          ],
+        ]
+      : [];
+
+  await Promise.all(
+    [...appFiles, ...infraFiles].map(([p, content]) => writeFile(p, content, "utf-8")),
+  );
+
+  return {
+    buildPreview,
+    generatedFiles,
+    componentRepoPath,
+    componentName,
+    useDefault,
+    harnessConfigKey: stableHarnessConfigKey(previewHarness.harnessConfig),
+    harnessDepsKey: stableHarnessDepsKey(previewHarness.harnessDependencies),
+    themeSelection: previewTheme?.selection,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Session manager
 // ---------------------------------------------------------------------------
@@ -1193,9 +1368,17 @@ export function createPreviewSessionManager(
   repoCache: RepoCloneCache,
 ): SessionManager {
   const sessions = new Map<string, PreviewSession>();
+  // Codegen jobs get a fresh jobId each push but share one Vite server per repo.
+  // Maps a per-push jobId → the stable session key the server is stored under.
+  const jobAliases = new Map<string, string>();
   const sessionStartup = new Map<string, Promise<PreviewSession>>();
   const swapLocks = new Map<string, Promise<PreviewSession>>();
   const recoveryLocks = new Map<string, Promise<boolean>>();
+
+  /** Resolve a session by per-push jobId or by its stable map key. */
+  function resolveSession(idOrKey: string): PreviewSession | undefined {
+    return sessions.get(jobAliases.get(idOrKey) ?? idOrKey);
+  }
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null;
 
   function startIdleCheck() {
@@ -1230,15 +1413,113 @@ export function createPreviewSessionManager(
     }
   }
 
+  /**
+   * Swap a new codegen result into an already-running Vite server for the same
+   * repo, avoiding a fresh install + Vite cold start + warmup on every push.
+   * Throws to signal the caller should fall back to a full cold start when the
+   * harness deps/config changed or Vite is unhealthy.
+   */
+  async function swapCodegenComponent(
+    sessionKey: string,
+    session: PreviewSession,
+    jobId: string,
+    buildPreview: JobBuildPreview,
+    config: PreviewSessionConfig,
+  ): Promise<PreviewSession> {
+    const pending = swapLocks.get(sessionKey);
+    if (pending) return pending;
+
+    const work = (async () => {
+      if (await harnessNeedsFreshInstall(session.harnessPath)) {
+        throw new Error("preview harness stale — cold start required");
+      }
+
+      const prepared = await prepareCodegenHarness(
+        session.repoClonePath,
+        session.harnessPath,
+        session.basePath ?? `/jobs/${jobId}/preview/`,
+        buildPreview,
+        config,
+        "swap",
+      );
+
+      // A changed dependency set or tsconfig/alias shape needs a rebuilt harness
+      // and Vite restart — cheaper and safer to cold start than to patch live.
+      if (session.harnessDepsKey && session.harnessDepsKey !== prepared.harnessDepsKey) {
+        throw new Error("preview harness dependencies changed — cold start required");
+      }
+      if (session.harnessConfigKey && session.harnessConfigKey !== prepared.harnessConfigKey) {
+        throw new Error("preview harness config changed — cold start required");
+      }
+
+      session.ready = false;
+      // App files are written; HMR is off, so the iframe fully reloads and Vite
+      // re-transforms the changed modules on the next request.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      session.componentPath = prepared.componentRepoPath;
+      session.componentName = prepared.componentName;
+      session.themeSelection = prepared.themeSelection;
+      session.generatedFiles = Array.from(
+        new Set([...session.generatedFiles, ...prepared.generatedFiles]),
+      );
+      session.harnessContext = {
+        buildPreview: prepared.buildPreview,
+        componentName: prepared.componentName,
+        componentRepoPath: prepared.componentRepoPath,
+        useDefault: prepared.useDefault,
+        config,
+      };
+      session.lastAccessedAt = Date.now();
+
+      if (isViteProcessAlive(session) && (await waitForViteResponding(session))) {
+        session.ready = true;
+        console.log(
+          `[fig2code] reused preview vite → ${prepared.componentName} (job ${jobId})`,
+        );
+        return session;
+      }
+      throw new Error("vite unhealthy after swap — cold start required");
+    })();
+
+    swapLocks.set(sessionKey, work);
+    try {
+      return await work;
+    } finally {
+      swapLocks.delete(sessionKey);
+    }
+  }
+
   async function startSession(
     jobId: string,
     buildPreview: JobBuildPreview,
     config: PreviewSessionConfig,
   ): Promise<PreviewSession> {
-    const existing = sessions.get(jobId);
+    // One Vite server per repo, reused across pushes. Keyed by a stable repo id
+    // (distinct from the existing-component preview key) rather than the jobId.
+    const sessionKey = `${repoPreviewSessionId(config.vcs)}-cg`;
+
+    const existing = sessions.get(sessionKey);
     if (existing) {
-      existing.lastAccessedAt = Date.now();
-      return existing;
+      if (existing.ready && isViteProcessAlive(existing)) {
+        try {
+          const swapped = await swapCodegenComponent(
+            sessionKey,
+            existing,
+            jobId,
+            buildPreview,
+            config,
+          );
+          jobAliases.set(jobId, sessionKey);
+          return swapped;
+        } catch (err) {
+          console.warn(
+            `[fig2code] codegen preview reuse failed, cold starting:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+      await stopSession(sessionKey);
     }
 
     await evictOldest();
@@ -1250,134 +1531,16 @@ export function createPreviewSessionManager(
       config.atlassianEmail,
     );
 
-    buildPreview = await formatJobBuildPreview(buildPreview, {
-      formatter: config.formatter ?? "auto",
-      repoRoot: repoClonePath,
-      existingFiles: buildPreview.files?.map((file) => ({
-        path: file.path,
-        content: file.content,
-      })),
-    });
-
-    // 2. Set up the preview harness directory inside the clone
+    // 2-4. Write generated files + the full preview harness
     const harnessPath = path.join(repoClonePath, PREVIEW_DIR);
-    await mkdir(harnessPath, { recursive: true });
-
-    const componentContent = buildPreview.componentContent ?? "";
-    const storyContent = buildPreview.storyContent ?? "";
-    const componentName = buildPreview.componentName;
-    const exportName = extractComponentName(
-      componentContent,
-      componentName,
-    );
-    const useDefault = isDefaultExport(componentContent, exportName);
-
-    // Determine the real repo path for the component
-    const componentRepoPath =
-      buildPreview.componentPath || `src/components/${componentName}.tsx`;
-
-    const generatedFiles: string[] = [];
-
-    // 3. Write generated component/story files at their real repo paths
-    if (componentContent) {
-      const fullPath = path.join(repoClonePath, componentRepoPath);
-      await mkdir(path.dirname(fullPath), { recursive: true });
-      await writeFile(fullPath, sanitizeJsxStyleProps(componentContent), "utf-8");
-      generatedFiles.push(componentRepoPath);
-    }
-
-    if (storyContent && buildPreview.storyPath) {
-      const fullPath = path.join(repoClonePath, buildPreview.storyPath);
-      await mkdir(path.dirname(fullPath), { recursive: true });
-      await writeFile(fullPath, sanitizeJsxStyleProps(storyContent), "utf-8");
-      generatedFiles.push(buildPreview.storyPath);
-    }
-
-    // Also write any extra files from codegen patches
-    if (buildPreview.files) {
-      for (const file of buildPreview.files) {
-        if (file.action === "delete" || !file.content) continue;
-        if (file.path === componentRepoPath) continue;
-        if (file.path === buildPreview.storyPath) continue;
-        const fullPath = path.join(repoClonePath, file.path);
-        await mkdir(path.dirname(fullPath), { recursive: true });
-        let contentToWrite = sanitizeJsxStyleProps(file.content);
-        if (isAppendExportPatch(file.content)) {
-          let existing = "";
-          try {
-            existing = await readFs(fullPath, "utf-8");
-          } catch {
-            existing = "";
-          }
-          const merged = mergeAppendExportIntoContent(existing, file.content);
-          if (!merged) {
-            continue;
-          }
-          contentToWrite = sanitizeJsxStyleProps(merged);
-        }
-        await writeFile(fullPath, contentToWrite, "utf-8");
-        generatedFiles.push(file.path);
-      }
-    }
-
-    // 4. Write the preview harness files
-    const previewHarness = await resolvePreviewHarnessContext(
-      repoClonePath,
-      componentRepoPath,
-      buildPreview,
-    );
-    const sbOptions = await resolveStorybookHarnessOptions(
+    const basePath = `/jobs/${jobId}/preview/`;
+    const prepared = await prepareCodegenHarness(
       repoClonePath,
       harnessPath,
+      basePath,
       buildPreview,
-      previewHarness,
-    );
-    const previewTheme = await resolvePreviewTheme(repoClonePath, componentRepoPath, {
-      tokenPaths: config.tokenPaths,
-      themeCatalog: config.themeCatalog,
-      selection: config.themeSelection,
-    });
-
-    const harnessFiles: Array<[string, string]> = [
-      [
-        path.join(harnessPath, "package.json"),
-        generateHarnessPackageJson(previewHarness.harnessDependencies),
-      ],
-      [
-        path.join(harnessPath, "vite.config.ts"),
-        generateHarnessViteConfig(
-          `/jobs/${jobId}/preview/`,
-          previewHarness.viteAliases,
-          previewHarness.harnessConfig.reactModules,
-          previewHarness.dependencyAliases,
-          previewHarness.storybook?.optimizeIncludes ?? [],
-        ),
-      ],
-      [
-        path.join(harnessPath, "tsconfig.json"),
-        generateHarnessTsConfig({
-          paths: previewHarness.harnessConfig.tsPaths,
-          include: previewHarness.tsInclude,
-        }),
-      ],
-      [
-        path.join(harnessPath, "index.html"),
-        generateIndexHtml(buildPreview, componentName, config, previewTheme),
-      ],
-      [
-        path.join(harnessPath, "main.tsx"),
-        generateMainTsx(
-          buildPreview,
-          componentName,
-          useDefault,
-          componentRepoPath,
-          sbOptions,
-        ),
-      ],
-    ];
-
-    await Promise.all(
-      harnessFiles.map(([p, content]) => writeFile(p, content, "utf-8")),
+      config,
+      "full",
     );
 
     // 5. Install harness deps (just vite + react plugin, fast)
@@ -1385,46 +1548,50 @@ export function createPreviewSessionManager(
     await installHarnessDeps(harnessPath);
 
     // 6. Start Vite dev server from the harness directory
-    const started = await startViteForHarness(
-      harnessPath,
-      `job ${jobId}`,
-      `/jobs/${jobId}/preview/`,
-    );
+    const started = await startViteForHarness(harnessPath, `job ${jobId}`, basePath);
 
     const session: PreviewSession = {
       jobId,
       repoClonePath,
       harnessPath,
+      basePath,
       vitePort: started.vitePort,
       viteProcess: started.viteProcess,
       previewUrl: started.previewUrl,
       startedAt: Date.now(),
       lastAccessedAt: Date.now(),
       ready: true,
-      generatedFiles,
-      componentPath: componentRepoPath,
-      componentName,
-      themeSelection: previewTheme?.selection,
+      generatedFiles: prepared.generatedFiles,
+      componentPath: prepared.componentRepoPath,
+      componentName: prepared.componentName,
+      harnessConfigKey: prepared.harnessConfigKey,
+      harnessDepsKey: prepared.harnessDepsKey,
+      themeSelection: prepared.themeSelection,
       harnessContext: {
-        buildPreview,
-        componentName,
-        componentRepoPath,
-        useDefault,
+        buildPreview: prepared.buildPreview,
+        componentName: prepared.componentName,
+        componentRepoPath: prepared.componentRepoPath,
+        useDefault: prepared.useDefault,
         config,
       },
     };
     attachViteExitHandler(session);
 
-    sessions.set(jobId, session);
+    sessions.set(sessionKey, session);
+    jobAliases.set(jobId, sessionKey);
     startIdleCheck();
     return session;
   }
 
-  async function stopSession(jobId: string): Promise<void> {
-    const session = sessions.get(jobId);
+  async function stopSession(jobIdOrKey: string): Promise<void> {
+    const key = jobAliases.get(jobIdOrKey) ?? jobIdOrKey;
+    const session = sessions.get(key);
     if (!session) return;
 
-    sessions.delete(jobId);
+    sessions.delete(key);
+    for (const [alias, aliasKey] of jobAliases) {
+      if (aliasKey === key) jobAliases.delete(alias);
+    }
 
     try {
       session.viteProcess.kill("SIGTERM");
@@ -1448,11 +1615,11 @@ export function createPreviewSessionManager(
       } catch {}
     }
 
-    console.log(`[fig2code] preview session stopped: ${jobId}`);
+    console.log(`[fig2code] preview session stopped: ${key}`);
   }
 
   function getSession(jobId: string): PreviewSession | undefined {
-    const session = sessions.get(jobId);
+    const session = resolveSession(jobId);
     if (session) {
       session.lastAccessedAt = Date.now();
     }
@@ -1464,7 +1631,7 @@ export function createPreviewSessionManager(
     filePath: string,
     content: string,
   ): Promise<void> {
-    const session = sessions.get(jobId);
+    const session = resolveSession(jobId);
     if (!session) {
       throw new Error(`No active preview session for job ${jobId}`);
     }
@@ -1952,7 +2119,7 @@ export function createPreviewSessionManager(
     jobId: string,
     selection: Partial<ThemeSelection>,
   ): Promise<ThemeSelection | null> {
-    const session = sessions.get(jobId);
+    const session = resolveSession(jobId);
     if (!session?.harnessContext) {
       throw new Error(`No active preview session for job ${jobId}`);
     }
