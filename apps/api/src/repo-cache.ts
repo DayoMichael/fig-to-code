@@ -1,9 +1,12 @@
-import { spawn } from "node:child_process";
-import { readdir, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { access, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { VcsConfig } from "@fig2code/spec";
-import { cloneRepository } from "@fig2code/git-host";
+import { cloneRepository, cloneUrl } from "@fig2code/git-host";
+
+const execFileAsync = promisify(execFile);
 
 interface CachedRepo {
   clonePath: string;
@@ -47,6 +50,12 @@ export function repoPreviewSessionId(vcs: VcsConfig): string {
 
 export function createRepoCloneCache(): RepoCloneCache {
   const cache = new Map<string, CachedRepo>();
+
+  // With FIG2CODE_CACHE_DIR set (e.g. a Railway volume mount), clones live at
+  // stable paths and survive restarts/deploys: a fresh process adopts the
+  // on-disk clone (fetch + reset) instead of paying a full clone + install.
+  // Without it, clones go to tmpdir under unique per-process paths as before.
+  const persistentRoot = process.env.FIG2CODE_CACHE_DIR?.trim() || null;
 
   const ttlCheck = setInterval(() => {
     const now = Date.now();
@@ -95,10 +104,9 @@ export function createRepoCloneCache(): RepoCloneCache {
       await evictOldest();
     }
 
-    const clonePath = path.join(
-      tmpdir(),
-      `fig2code-repo-${key}-${Date.now()}`,
-    );
+    const clonePath = persistentRoot
+      ? path.join(persistentRoot, `fig2code-repo-${key}`)
+      : path.join(tmpdir(), `fig2code-repo-${key}-${Date.now()}`);
 
     const entry: CachedRepo = {
       clonePath,
@@ -110,8 +118,18 @@ export function createRepoCloneCache(): RepoCloneCache {
     };
 
     const setupPromise = (async (): Promise<string> => {
-      console.log(`[fig2code] cloning repo: ${key} → ${clonePath}`);
-      await cloneRepository({ vcs, token: gitToken, targetDir: clonePath });
+      if (persistentRoot) {
+        await mkdir(persistentRoot, { recursive: true });
+      }
+      const adopted = persistentRoot
+        ? await adoptExistingClone(clonePath, vcs, gitToken)
+        : false;
+      if (adopted) {
+        console.log(`[fig2code] adopted persisted clone: ${key} → ${clonePath}`);
+      } else {
+        console.log(`[fig2code] cloning repo: ${key} → ${clonePath}`);
+        await cloneRepository({ vcs, token: gitToken, targetDir: clonePath });
+      }
 
       console.log(`[fig2code] installing deps in cached clone: ${clonePath}`);
       await installDepsInRepo(clonePath);
@@ -144,6 +162,9 @@ export function createRepoCloneCache(): RepoCloneCache {
   async function evictAll(): Promise<void> {
     const entries = [...cache.values()];
     cache.clear();
+    // With a persistent cache dir, leave clones on disk at shutdown so the
+    // next process adopts them instead of re-cloning + reinstalling.
+    if (persistentRoot) return;
     await Promise.all(
       entries.map((e) =>
         rm(e.clonePath, { recursive: true, force: true }).catch(() => {}),
@@ -152,6 +173,51 @@ export function createRepoCloneCache(): RepoCloneCache {
   }
 
   return { getOrClone, evict, evictAll };
+}
+
+/**
+ * Reuse a clone left on disk by a previous process: refresh tracked files via
+ * fetch + hard reset against a fresh token-bearing URL (the URL stored at
+ * clone time may hold an expired token). Untracked files — the repo's
+ * node_modules and the preview harness — are deliberately left in place;
+ * they are what makes adoption fast. Any failure clears the directory so the
+ * caller falls back to a full clone.
+ */
+async function adoptExistingClone(
+  clonePath: string,
+  vcs: VcsConfig,
+  gitToken: string,
+): Promise<boolean> {
+  try {
+    await access(path.join(clonePath, ".git"));
+  } catch {
+    // Missing or partial (no .git) directory — clear leftovers so git clone
+    // doesn't refuse a non-empty target.
+    await rm(clonePath, { recursive: true, force: true }).catch(() => {});
+    return false;
+  }
+
+  const branch = vcs.baseBranch || "main";
+  const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  try {
+    await execFileAsync(
+      "git",
+      ["fetch", "--depth", "1", cloneUrl(vcs, gitToken), branch],
+      { cwd: clonePath, env: gitEnv },
+    );
+    await execFileAsync("git", ["reset", "--hard", "FETCH_HEAD"], {
+      cwd: clonePath,
+      env: gitEnv,
+    });
+    return true;
+  } catch (err) {
+    console.warn(
+      `[fig2code] persisted clone unusable, re-cloning ${clonePath}:`,
+      err instanceof Error ? err.message : err,
+    );
+    await rm(clonePath, { recursive: true, force: true }).catch(() => {});
+    return false;
+  }
 }
 
 async function detectPackageManager(

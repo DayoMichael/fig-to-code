@@ -576,6 +576,28 @@ function generateIndexHtml(
         font-size: 12px;
         line-height: 1.4;
       }
+      /* Boot spinner: lives inside #root so React's first render replaces it
+         the instant the component mounts. Covers the module-load window
+         between this HTML arriving and main.tsx finishing. */
+      .fig2code-boot {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 32px 0;
+        color: ${mutedText};
+        font-size: 12px;
+      }
+      .fig2code-boot-spinner {
+        width: 22px;
+        height: 22px;
+        border: 2px solid ${frameBorder};
+        border-top-color: ${mutedText};
+        border-radius: 50%;
+        animation: fig2code-spin 0.8s linear infinite;
+      }
+      @keyframes fig2code-spin { to { transform: rotate(360deg); } }
     </style>
   </head>
   <body>
@@ -585,9 +607,22 @@ function generateIndexHtml(
           <div><strong id="fig2code-component-label">${componentName}</strong> / <span id="fig2code-variant-label">${variantLabel}</span></div>
           <div>${formatLabel}</div>
         </div>
-        <div class="preview-canvas">${storyNotice}<div id="root"></div></div>
+        <div class="preview-canvas">${storyNotice}<div id="root"><div class="fig2code-boot"><div class="fig2code-boot-spinner"></div><div>Loading ${componentName}…</div></div></div></div>
       </div>
     </div>
+    <script>
+      // If the entry module fails before React mounts (e.g. a bad import in
+      // generated code), surface the error in place of the boot spinner
+      // instead of spinning forever.
+      window.addEventListener('error', function (e) {
+        var boot = document.querySelector('.fig2code-boot');
+        if (!boot) return; // component already mounted
+        var msg = document.createElement('div');
+        msg.className = 'preview-error';
+        msg.textContent = 'Preview failed to load: ' + (e.message || 'module error — see console');
+        boot.replaceChildren(msg);
+      }, true);
+    </script>
     <script type="module" src="${mainModuleSrc}"></script>
   </body>
 </html>`;
