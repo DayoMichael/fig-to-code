@@ -1787,7 +1787,7 @@ function flushCurrentEdit() {
     editedFiles.delete(selectedPreviewFilePath);
     refreshEditedBadges();
     setSaveStatus("saved");
-    hotReloadPreview();
+    hotReloadPreview(selectedPreviewFilePath, content);
     applyCreatePrButtonState();
   }
 }
@@ -1808,45 +1808,39 @@ function applyEditToPreview(filePath: string, content: string) {
   }
 }
 
-function getComponentSourceForPreview(): string {
-  if (!currentBuildPreview) return "";
-  const componentPath = currentBuildPreview.componentPath;
-  if (currentBuildPreview.files?.length) {
-    if (componentPath) {
-      const byPath = currentBuildPreview.files.find((entry) => entry.path === componentPath);
-      if (byPath?.content) return byPath.content;
-    }
-    const componentName = currentBuildPreview.componentName;
-    const byName = currentBuildPreview.files.find(
-      (entry) => basename(entry.path).replace(/\.(tsx|jsx)$/, "") === componentName,
-    );
-    if (byName?.content) return byName.content;
-  }
-  return currentBuildPreview.componentContent ?? "";
-}
-
 function shouldHotReloadPreview(filePath: string | null): boolean {
   if (!currentBuildPreview || !filePath) return false;
+  // Any file in the preview bundle affects the rendered output — component,
+  // story, barrel, and related modules are all served to the iframe by Vite.
   if (filePath === currentBuildPreview.componentPath) return true;
-  const componentName = currentBuildPreview.componentName;
-  return basename(filePath).replace(/\.(tsx|jsx)$/, "") === componentName;
+  if (filePath === currentBuildPreview.storyPath) return true;
+  return Boolean(currentBuildPreview.files?.some((file) => file.path === filePath));
 }
 
-function hotReloadPreview() {
-  if (!currentBuildPreview) return;
-  if (!shouldHotReloadPreview(selectedPreviewFilePath)) return;
-  if (!currentPreviewJobId) return;
-  const raw = getComponentSourceForPreview();
-  if (!raw.trim()) return;
-
-  const filePath = selectedPreviewFilePath ?? currentBuildPreview.componentPath ?? "";
-  if (!filePath) return;
+function hotReloadPreview(filePath: string, content: string) {
+  if (!currentBuildPreview || !currentPreviewJobId) return;
+  if (!shouldHotReloadPreview(filePath)) return;
+  if (!content.trim()) return;
 
   fetch(`${apiBase}/jobs/${currentPreviewJobId}/preview/files`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: filePath, content: raw }),
-  }).catch(() => {});
+    body: JSON.stringify({ path: filePath, content }),
+  })
+    .then((res) => {
+      if (!res.ok || !currentPreviewUrl) return;
+      // The preview harness runs with HMR disabled (the proxy can't tunnel
+      // Vite's websocket), so the saved file only shows up after a full
+      // iframe reload — same pattern as theme changes.
+      const baseUrl = currentPreviewUrl.split("?")[0] ?? currentPreviewUrl;
+      const reloadUrl = withPreviewReloadToken(baseUrl, currentBuildPreview?.componentName);
+      currentPreviewUrl = reloadUrl;
+      reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
+      if (!previewModalEl.classList.contains("hidden")) {
+        reloadPreviewFrame(previewModalFrameEl, reloadUrl);
+      }
+    })
+    .catch(() => {});
 }
 
 function handleCodeEditorInput(source: CodeExplorerElements) {
@@ -1881,7 +1875,7 @@ function handleCodeEditorInput(source: CodeExplorerElements) {
     editedFiles.delete(selectedPreviewFilePath);
     refreshEditedBadges();
     setSaveStatus("saved");
-    hotReloadPreview();
+    hotReloadPreview(selectedPreviewFilePath, content);
     applyCreatePrButtonState();
   }, 800);
 }
@@ -3625,34 +3619,25 @@ function extractStreamedFiles(raw: string): StreamedFile[] {
 let streamTreeCollapsed = false;
 let streamSelectedPath: string | null = null;
 
+type StreamJob = Parameters<typeof formatJobStatus>[0];
+
 /**
  * Render the live codegen stream as an IDE-style editor panel — collapsible
- * file tree, gutter, syntax highlighting, pinned-to-bottom scroll — inside the
- * status element. Falls back to plain formatJobStatus text for every other
- * state. The HTML is built without literal newlines: #status is
- * white-space: pre-wrap, so any formatting whitespace renders as blank lines.
+ * file tree with action badges, gutter, syntax highlighting, pinned-to-bottom
+ * scroll — into the given host element. Shared by the create flow (status
+ * area) and the update-with-Figma flow (activity stream). The HTML is built
+ * without literal newlines: hosts can be white-space: pre-wrap, where any
+ * formatting whitespace renders as blank lines.
  */
-function updateJobStatusDisplay(job: Parameters<typeof formatJobStatus>[0]): void {
-  if (job.status !== "codegen" || !job.codegenStream) {
-    streamSelectedPath = null;
-    statusEl.textContent = formatJobStatus(job);
-    return;
-  }
-
-  const files = extractStreamedFiles(job.codegenStream);
+function renderStreamPanel(host: HTMLElement, job: StreamJob, rerender: () => void): void {
+  const files = extractStreamedFiles(job.codegenStream ?? "");
   const active = files.length ? files[files.length - 1]! : null;
   const selected =
     (streamSelectedPath && files.find((f) => f.path === streamSelectedPath)) || active;
   const following = !streamSelectedPath || selected === active;
-  const code = selected ? selected.code : job.codegenStream.slice(-600);
+  const code = selected ? selected.code : (job.codegenStream ?? "").slice(-600);
   const headerText = selected ? selected.path : "model output…";
   const lines = code ? code.split("\n") : [""];
-
-  const meta = [
-    job.componentName ? `Component: ${job.componentName}` : null,
-    `Job: ${job.id}`,
-    `Status: ${job.status}`,
-  ].filter(Boolean) as string[];
 
   const tree = files
     .map((file) => {
@@ -3671,8 +3656,7 @@ function updateJobStatusDisplay(job: Parameters<typeof formatJobStatus>[0]): voi
     .join("");
 
   const streaming = Boolean(active && !active.done);
-  statusEl.innerHTML =
-    escapeHtml(meta.join("\n")).replace(/\n/g, "<br>") +
+  host.innerHTML =
     '<div class="stream-code-wrap">' +
     '<div class="code-editor-header">' +
     `<button type="button" class="stream-tree-toggle" title="Toggle file list">${streamTreeCollapsed ? "▸" : "▾"}</button>` +
@@ -3690,23 +3674,58 @@ function updateJobStatusDisplay(job: Parameters<typeof formatJobStatus>[0]): voi
     `<pre class="code-scroll"><code>${highlightTs(code) || '<span class="tok-plain">&nbsp;</span>'}</code></pre>` +
     "</div></div></div></div>";
 
-  statusEl.querySelector(".stream-tree-toggle")?.addEventListener("click", () => {
+  host.querySelector(".stream-tree-toggle")?.addEventListener("click", () => {
     streamTreeCollapsed = !streamTreeCollapsed;
-    updateJobStatusDisplay(job);
+    rerender();
   });
-  statusEl.querySelectorAll<HTMLElement>(".stream-file").forEach((el) => {
+  host.querySelectorAll<HTMLElement>(".stream-file").forEach((el) => {
     el.addEventListener("click", () => {
       const path = el.dataset.path ?? null;
       // Re-clicking the active file resumes following the stream.
       streamSelectedPath = path && files[files.length - 1]?.path === path ? null : path;
-      updateJobStatusDisplay(job);
+      rerender();
     });
   });
 
   if (following) {
-    const scroller = statusEl.querySelector(".stream-code-scroll");
+    const scroller = host.querySelector(".stream-code-scroll");
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }
+}
+
+function updateJobStatusDisplay(job: StreamJob): void {
+  if (job.status !== "codegen" || !job.codegenStream) {
+    streamSelectedPath = null;
+    statusEl.textContent = formatJobStatus(job);
+    return;
+  }
+
+  const meta = [
+    job.componentName ? `Component: ${job.componentName}` : null,
+    `Job: ${job.id}`,
+    `Status: ${job.status}`,
+  ].filter(Boolean) as string[];
+
+  statusEl.innerHTML =
+    escapeHtml(meta.join("\n")).replace(/\n/g, "<br>") + '<div class="stream-panel-host"></div>';
+  const host = statusEl.querySelector<HTMLElement>(".stream-panel-host");
+  if (host) renderStreamPanel(host, job, () => updateJobStatusDisplay(job));
+}
+
+/**
+ * Update-with-Figma flow: the preview stays visible while the job runs, and
+ * progress renders in the correction/activity stream. Mount the same live
+ * code panel there so update jobs stream exactly like create jobs.
+ */
+function renderCorrectionStreamPanel(job: StreamJob): void {
+  let host = correctionStreamEl.querySelector<HTMLElement>(".stream-panel-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "stream-panel-host";
+    correctionStreamEl.appendChild(host);
+    correctionStreamEl.scrollTop = correctionStreamEl.scrollHeight;
+  }
+  renderStreamPanel(host, job, () => renderCorrectionStreamPanel(job));
 }
 
 function formatJobStatus(job: {
@@ -4007,6 +4026,8 @@ window.onmessage = (event: MessageEvent) => {
 
     if (!preservedRun) {
       updateJobStatusDisplay(job);
+    } else if (job.status === "codegen" && job.codegenStream) {
+      renderCorrectionStreamPanel(job);
     }
 
     if (job.status === "validated" && job.buildPreview) {
