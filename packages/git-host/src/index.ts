@@ -3,6 +3,7 @@ export type { GitHostAuth } from "./auth.js";
 export { asGitHostAuth, bitbucketAuthorizationHeader } from "./auth.js";
 export { BitbucketProvider, verifyBitbucketAccess } from "./bitbucket.js";
 export { cloneRepository } from "./clone.js";
+export type { RepositorySummary } from "./types.js";
 export {
   GitHostApiError,
   resetFetchImplementation,

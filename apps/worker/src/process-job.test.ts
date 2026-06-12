@@ -66,7 +66,8 @@ describe("processJob", () => {
     );
 
     assert.equal(result.status, "validated");
-    assert.equal(result.patchCount, 2);
+    // component + story + test + package index export
+    assert.equal(result.patchCount, 4);
     assert.equal(mock.calls.length, 1);
   });
 

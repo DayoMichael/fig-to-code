@@ -61,6 +61,12 @@ export interface JobRecord {
   buildPreview?: JobBuildPreview;
   /** Rolling tail of the LLM's raw output while status is "codegen". */
   codegenStream?: string;
+  /**
+   * Capability token authorizing access to this job's status, preview, and
+   * mutation endpoints. Returned ONLY in the enqueue response — never on
+   * subsequent reads.
+   */
+  accessToken?: string;
 }
 
 export interface JobBuildPreviewFile {

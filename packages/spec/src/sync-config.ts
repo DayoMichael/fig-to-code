@@ -55,6 +55,8 @@ export interface ConventionsConfig {
   storyFormat: StoryFormat;
   /** Defaults to "auto" when omitted (detect Prettier from repo). */
   formatter?: FormatterPreference;
+  /** Generate a Code Connect (.figma.tsx) file for new components. Set from repo detection. */
+  codeConnect?: boolean;
 }
 
 export type CompactionMode = "off" | "auto";

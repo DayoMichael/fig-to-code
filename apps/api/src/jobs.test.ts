@@ -122,8 +122,13 @@ describe("jobs API", () => {
     });
 
     assert.equal(createRes.status, 202);
-    const created = (await createRes.json()) as { id: string; status: string };
+    const created = (await createRes.json()) as {
+      id: string;
+      status: string;
+      accessToken?: string;
+    };
     assert.equal(created.status, "queued");
+    assert.ok(created.accessToken, "enqueue response must include the job access token");
 
     const client = createWorkerApiClient({
       apiBase: "http://test",
@@ -142,15 +147,29 @@ describe("jobs API", () => {
     });
     assert.equal(finalJob.status, "validated");
     assert.equal(finalJob.componentName, "Button");
-    assert.equal(finalJob.patchCount, 2);
-    assert.match(finalJob.codegenSummary ?? "", /Generated Button|Generated 2 patch/);
+    // component + story + test + package index export
+    assert.equal(finalJob.patchCount, 4);
+    assert.match(finalJob.codegenSummary ?? "", /Generated Button|Generated \d+ patch/);
 
-    const getRes = await app.request(`/jobs/${created.id}`);
-    const fetched = (await getRes.json()) as { status: string; patchCount?: number };
+    // Status reads require the capability token from the enqueue response.
+    const unauthorized = await app.request(`/jobs/${created.id}`);
+    assert.equal(unauthorized.status, 401);
+
+    const getRes = await app.request(`/jobs/${created.id}`, {
+      headers: { "x-job-token": created.accessToken! },
+    });
+    const fetched = (await getRes.json()) as {
+      status: string;
+      patchCount?: number;
+      accessToken?: string;
+    };
     assert.equal(fetched.status, "validated");
-    assert.equal(fetched.patchCount, 2);
+    assert.equal(fetched.patchCount, 4);
+    assert.equal(fetched.accessToken, undefined, "token must not appear on reads");
 
-    const previewRes = await app.request(`/jobs/${created.id}/preview`);
+    const previewRes = await app.request(
+      `/jobs/${created.id}/preview?jobToken=${created.accessToken}`,
+    );
     const previewStatus = previewRes.status;
     assert.ok(
       previewStatus === 200 || previewStatus === 500,

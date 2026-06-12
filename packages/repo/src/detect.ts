@@ -186,6 +186,7 @@ export function detectedConfigToSyncConfig(
       testFramework: detected.testFramework,
       storyFormat: detected.storyFormat,
       formatter: detected.formatter === "prettier" ? "prettier" : "auto",
+      codeConnect: detected.hasCodeConnect,
     },
     llm: {
       modelId: "anthropic/claude-sonnet",

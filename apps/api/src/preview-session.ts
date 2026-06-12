@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { mkdir, readFile as readFs, writeFile, rm, access } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
@@ -52,6 +53,8 @@ export interface PreviewSession {
   harnessDepsKey?: string;
   /** Stable preview base path the browser is redirected to (codegen sessions). */
   basePath?: string;
+  /** Random public id embedded in basePath — the capability for proxy routes. */
+  publicId?: string;
   /** True while an intentional vite restart is in progress (ignore exit events). */
   restartingVite?: boolean;
   themeSelection?: ThemeSelection;
@@ -870,6 +873,20 @@ async function harnessDepsInstalled(harnessPath: string): Promise<boolean> {
  * runs on the browser's first request and blows past the client readiness
  * timeout, surfacing as "Preview did not load …".
  */
+/**
+ * Resolve a client-supplied repo-relative path inside `root`, rejecting
+ * absolute paths and `..` traversal that would escape the workspace. Every
+ * path that arrives via a job request or preview-edit API must go through
+ * this before touching the filesystem.
+ */
+function resolveSafeRepoPath(root: string, relPath: string): string {
+  const resolved = path.resolve(root, relPath);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`Refusing to access a path outside the preview workspace: ${relPath}`);
+  }
+  return resolved;
+}
+
 async function warmUpVite(
   previewUrl: string,
   basePath: string,
@@ -1282,14 +1299,14 @@ async function prepareCodegenHarness(
   const generatedFiles: string[] = [];
 
   if (componentContent) {
-    const fullPath = path.join(repoClonePath, componentRepoPath);
+    const fullPath = resolveSafeRepoPath(repoClonePath, componentRepoPath);
     await mkdir(path.dirname(fullPath), { recursive: true });
     await writeFile(fullPath, sanitizeJsxStyleProps(componentContent), "utf-8");
     generatedFiles.push(componentRepoPath);
   }
 
   if (storyContent && buildPreview.storyPath) {
-    const fullPath = path.join(repoClonePath, buildPreview.storyPath);
+    const fullPath = resolveSafeRepoPath(repoClonePath, buildPreview.storyPath);
     await mkdir(path.dirname(fullPath), { recursive: true });
     await writeFile(fullPath, sanitizeJsxStyleProps(storyContent), "utf-8");
     generatedFiles.push(buildPreview.storyPath);
@@ -1300,7 +1317,7 @@ async function prepareCodegenHarness(
       if (file.action === "delete" || !file.content) continue;
       if (file.path === componentRepoPath) continue;
       if (file.path === buildPreview.storyPath) continue;
-      const fullPath = path.join(repoClonePath, file.path);
+      const fullPath = resolveSafeRepoPath(repoClonePath, file.path);
       await mkdir(path.dirname(fullPath), { recursive: true });
       let contentToWrite = sanitizeJsxStyleProps(file.content);
       if (isAppendExportPatch(file.content)) {
@@ -1570,7 +1587,10 @@ export function createPreviewSessionManager(
 
     // 2-4. Write generated files + the full preview harness
     const harnessPath = path.join(repoClonePath, PREVIEW_DIR);
-    const basePath = `/jobs/${jobId}/preview/`;
+    // Random public id: every asset URL the iframe loads inherits this base,
+    // so possession of the URL is the access capability for the proxy routes.
+    const publicId = randomUUID();
+    const basePath = `/jobs/${publicId}/preview/`;
     const prepared = await prepareCodegenHarness(
       repoClonePath,
       harnessPath,
@@ -1598,6 +1618,7 @@ export function createPreviewSessionManager(
       startedAt: Date.now(),
       lastAccessedAt: Date.now(),
       ready: true,
+      publicId,
       generatedFiles: prepared.generatedFiles,
       componentPath: prepared.componentRepoPath,
       componentName: prepared.componentName,
@@ -1616,6 +1637,7 @@ export function createPreviewSessionManager(
 
     sessions.set(sessionKey, session);
     jobAliases.set(jobId, sessionKey);
+    jobAliases.set(publicId, sessionKey);
     startIdleCheck();
     return session;
   }
@@ -1647,7 +1669,7 @@ export function createPreviewSessionManager(
     // Clean up generated files from the clone (but not the clone itself)
     for (const relPath of session.generatedFiles) {
       try {
-        const fullPath = path.join(session.repoClonePath, relPath);
+        const fullPath = resolveSafeRepoPath(session.repoClonePath, relPath);
         await rm(fullPath, { force: true });
       } catch {}
     }
@@ -1674,7 +1696,7 @@ export function createPreviewSessionManager(
     }
     session.lastAccessedAt = Date.now();
 
-    const targetPath = path.join(session.repoClonePath, filePath);
+    const targetPath = resolveSafeRepoPath(session.repoClonePath, filePath);
     await mkdir(path.dirname(targetPath), { recursive: true });
     await writeFile(targetPath, content, "utf-8");
 
@@ -1702,7 +1724,7 @@ export function createPreviewSessionManager(
   }
 
   async function writeExistingHarnessFiles(
-    sessionId: string,
+    basePath: string,
     harnessPath: string,
     repoClonePath: string,
     options: StartExistingOptions,
@@ -1772,7 +1794,7 @@ export function createPreviewSessionManager(
       [
         path.join(harnessPath, "vite.config.ts"),
         generateHarnessViteConfig(
-          `/preview/existing/${sessionId}/`,
+          basePath,
           previewHarness.viteAliases,
           previewHarness.harnessConfig.reactModules,
           previewHarness.dependencyAliases,
@@ -1917,8 +1939,11 @@ export function createPreviewSessionManager(
     console.log(`[fig2code] preview aliases:`, harnessConfig.viteAliases);
     console.log(`[fig2code] preview variants:`, ctx.buildPreview.variants);
 
+    const publicId = randomUUID();
+    const basePath = `/preview/existing/${publicId}/`;
+
     await writeExistingHarnessFiles(
-      sessionId,
+      basePath,
       harnessPath,
       repoClonePath,
       options,
@@ -1937,13 +1962,15 @@ export function createPreviewSessionManager(
     const started = await startViteForHarness(
       harnessPath,
       `existing component ${ctx.componentName}`,
-      `/preview/existing/${sessionId}/`,
+      basePath,
     );
 
     const session: PreviewSession = {
       jobId: sessionId,
       repoClonePath,
       harnessPath,
+      basePath,
+      publicId,
       vitePort: started.vitePort,
       viteProcess: started.viteProcess,
       previewUrl: started.previewUrl,
@@ -1980,6 +2007,7 @@ export function createPreviewSessionManager(
     attachViteExitHandler(session);
 
     sessions.set(sessionId, session);
+    jobAliases.set(publicId, sessionId);
     startIdleCheck();
     return session;
   }
@@ -2029,7 +2057,7 @@ export function createPreviewSessionManager(
         if (configChanged) {
           console.log(`[fig2code] preview harness config changed — restarting vite`);
           await writeExistingHarnessFiles(
-            session.jobId,
+            session.basePath ?? `/preview/existing/${session.jobId}/`,
             session.harnessPath,
             session.repoClonePath,
             options,
@@ -2040,7 +2068,7 @@ export function createPreviewSessionManager(
           session.harnessConfigKey = configKey;
         } else {
           await writeExistingHarnessFiles(
-            session.jobId,
+            session.basePath ?? `/preview/existing/${session.jobId}/`,
             session.harnessPath,
             session.repoClonePath,
             options,

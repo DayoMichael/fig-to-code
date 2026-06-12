@@ -15,6 +15,8 @@ export interface StoredJobSecrets {
 export interface StoredJob extends JobRecord {
   request: EnqueueJobRequest;
   secrets: StoredJobSecrets;
+  /** Capability token gating this job's status/preview/mutation endpoints. */
+  jobAccessToken: string;
 }
 
 export interface JobStore {
@@ -41,9 +43,12 @@ export function createJobStore(): JobStore {
         updatedAt: now,
         request,
         secrets,
+        jobAccessToken: randomUUID(),
       };
       jobs.set(id, record);
-      return toPublicRecord(record);
+      // The access token rides ONLY this response — the enqueuing client is
+      // the sole holder of the capability for this job.
+      return { ...toPublicRecord(record), accessToken: record.jobAccessToken };
     },
 
     get(id) {

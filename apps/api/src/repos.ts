@@ -208,6 +208,39 @@ export function createReposRouter(options: ReposRouterOptions = {}): Hono {
     return c.json(result);
   });
 
+  // List repositories the token can access — powers the connect-time repo
+  // picker so designers select instead of typing owner/repo by hand.
+  app.post("/list", async (c) => {
+    let provider: string | undefined;
+    try {
+      const body = (await c.req.json()) as {
+        provider?: string;
+        token?: string;
+        atlassianEmail?: string;
+      };
+      provider = body.provider;
+      if (!provider || !body.token?.trim()) {
+        return c.json({ error: "provider and token are required" }, 400);
+      }
+
+      const git = createGitHostProvider(provider);
+      const repositories = await git.listRepositories({
+        token: body.token.trim(),
+        atlassianEmail: body.atlassianEmail?.trim() || undefined,
+      });
+      return c.json({ repositories });
+    } catch (err) {
+      if (err instanceof GitHostApiError) {
+        const status = err.status === 401 || err.status === 403 ? err.status : 502;
+        return c.json({ error: formatGitHostApiError(err, provider ?? "github") }, status);
+      }
+      return c.json(
+        { error: err instanceof Error ? err.message : "Failed to list repositories" },
+        500,
+      );
+    }
+  });
+
   app.post("/resolve-component", async (c) => {
     let provider: string | undefined;
     try {

@@ -153,9 +153,31 @@ async function proxyToVite(
   }
 }
 
+/**
+ * The worker secret gates the claim/patch channel that hands out git and LLM
+ * tokens. The dev default is acceptable only on a developer machine; in
+ * production a missing WORKER_SECRET must be a startup failure, not a silent
+ * fallback to a publicly-known string.
+ */
+function resolveWorkerSecret(explicit?: string): string {
+  const secret = explicit?.trim() || process.env.WORKER_SECRET?.trim();
+  if (secret) return secret;
+  const isProduction =
+    process.env.NODE_ENV === "production" || Boolean(process.env.RAILWAY_ENVIRONMENT);
+  if (isProduction) {
+    throw new Error(
+      "WORKER_SECRET must be set in production — refusing to start with the public dev default",
+    );
+  }
+  console.warn(
+    "[fig2code] WORKER_SECRET not set — using the insecure dev default (local development only)",
+  );
+  return "dev-worker-secret";
+}
+
 export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   const store = options.store ?? createJobStore();
-  const workerSecret = options.workerSecret ?? process.env.WORKER_SECRET ?? "dev-worker-secret";
+  const workerSecret = resolveWorkerSecret(options.workerSecret);
   const repoCache = options.repoCache ?? createRepoCloneCache();
   const previewSessions = createPreviewSessionManager(repoCache);
   options.onCleanup?.(() => Promise.all([previewSessions.stopAll(), repoCache.evictAll()]).then(() => {}));
@@ -171,6 +193,16 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   // next poll can surface them instead of spinning forever.
   const pendingPreviewStarts = new Map<string, Promise<unknown>>();
   const failedPreviewStarts = new Map<string, string>();
+
+  // Per-job capability auth: the enqueue response carries a one-time access
+  // token; every status/preview/mutation route for that job requires it back
+  // (header for fetches, query for iframe navigations). Preview asset proxy
+  // routes are instead protected by the session's unguessable base path.
+  const authorizeJob = (c: Context, stored: { jobAccessToken: string }): boolean => {
+    const presented =
+      c.req.header("x-job-token")?.trim() || c.req.query("jobToken")?.trim();
+    return Boolean(presented) && presented === stored.jobAccessToken;
+  };
 
   const app = new Hono();
 
@@ -222,11 +254,14 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   });
 
   app.get("/jobs/:id", (c) => {
-    const job = store.get(c.req.param("id"));
-    if (!job) {
+    const stored = store.getStored(c.req.param("id"));
+    if (!stored) {
       return c.json({ error: "Job not found" }, 404);
     }
-    return c.json(job);
+    if (!authorizeJob(c, stored)) {
+      return c.json({ error: "Missing or invalid job token" }, 401);
+    }
+    return c.json(store.get(c.req.param("id"))!);
   });
 
   app.post("/jobs/:id/pull-request", async (c) => {
@@ -238,6 +273,9 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
     const stored = store.getStored(c.req.param("id"));
     if (!stored) {
       return c.json({ error: "Job not found" }, 404);
+    }
+    if (!authorizeJob(c, stored)) {
+      return c.json({ error: "Missing or invalid job token" }, 401);
     }
 
     if (stored.status !== "validated" && stored.status !== "pr_opened") {
@@ -398,8 +436,16 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
     if (!stored) {
       return c.json({ error: "Job not found" }, 404);
     }
-    if (stored.status !== "validated" || !stored.buildPreview) {
+    // pr_opened keeps the preview alive: the iframe reloads on theme changes
+    // and edits, and a 404 here would blank it the moment a PR is created.
+    if (
+      (stored.status !== "validated" && stored.status !== "pr_opened") ||
+      !stored.buildPreview
+    ) {
       return c.json({ error: "Preview is available after a validated build" }, 404);
+    }
+    if (!authorizeJob(c, stored)) {
+      return c.json({ error: "Missing or invalid job token" }, 401);
     }
 
     const jobId = c.req.param("id");
@@ -478,6 +524,10 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   });
 
   app.post("/jobs/:id/preview/theme", async (c) => {
+    const storedForTheme = store.getStored(c.req.param("id"));
+    if (storedForTheme && !authorizeJob(c, storedForTheme)) {
+      return c.json({ error: "Missing or invalid job token" }, 401);
+    }
     const session = previewSessions.getSession(c.req.param("id"));
     if (!session) {
       return c.json({ error: "No active preview session" }, 404);
@@ -496,6 +546,9 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
     const stored = store.getStored(c.req.param("id"));
     if (!stored) {
       return c.json({ error: "Job not found" }, 404);
+    }
+    if (!authorizeJob(c, stored)) {
+      return c.json({ error: "Missing or invalid job token" }, 401);
     }
 
     const session = previewSessions.getSession(c.req.param("id"));
@@ -517,6 +570,10 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
   });
 
   app.delete("/jobs/:id/preview", async (c) => {
+    const storedForDelete = store.getStored(c.req.param("id"));
+    if (storedForDelete && !authorizeJob(c, storedForDelete)) {
+      return c.json({ error: "Missing or invalid job token" }, 401);
+    }
     await previewSessions.stopSession(c.req.param("id"));
     return c.json({ ok: true });
   });
@@ -561,9 +618,12 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
         themeSelection: body.themeSelection,
       });
 
+      // Hand back the session's random public id, not the repo-derived key:
+      // the unguessable URL is the access capability for the preview routes.
+      const publicId = session.publicId ?? sessionId;
       return c.json({
-        sessionId,
-        previewUrl: `/preview/existing/${sessionId}/`,
+        sessionId: publicId,
+        previewUrl: session.basePath ?? `/preview/existing/${publicId}/`,
         viteUrl: session.previewUrl,
         reused,
       });
@@ -771,7 +831,7 @@ function previewErrorHtml(componentName: string, message: string): string {
   <div class="error-card">
     <div class="error-title">Preview failed to start for ${safeName}</div>
     <div class="error-detail">${safeMessage}</div>
-    <button onclick="location.href = location.pathname + '?retry=1'">Retry</button>
+    <button onclick="var u = new URL(location.href); u.searchParams.set('retry', '1'); location.href = u.toString();">Retry</button>
   </div>
 </body>
 </html>`;

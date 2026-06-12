@@ -17,6 +17,7 @@ export interface CodegenFilePlan {
   barrelPath?: string;
   packageIndexPath?: string;
   packageIndexExportPath?: string;
+  codeConnectPath?: string;
   storyImportFrom: string;
   testImportFrom: string;
   layout: "folder" | "flat-monorepo" | "flat";
@@ -65,6 +66,7 @@ export function planCodegenFiles(
     barrelPath,
     packageIndexPath,
     packageIndexExportPath,
+    codeConnectPath: join(componentDir, `${componentBaseName}.figma.tsx`),
     storyImportFrom,
     testImportFrom,
     layout,
@@ -160,6 +162,24 @@ export function ensureCodegenScaffolds(
       content: buildPackageIndexAppendPatch(plan),
     });
     paths.add(plan.packageIndexPath);
+  }
+
+  const existingCodeConnect = existingFiles?.files.some(
+    (file) => file.role === "code-connect",
+  );
+  if (
+    syncConfig.conventions.codeConnect &&
+    plan.codeConnectPath &&
+    !existingCodeConnect &&
+    !paths.has(plan.codeConnectPath) &&
+    !next.some((patch) => /\.figma\.(tsx|ts)$/.test(patch.path))
+  ) {
+    next.push({
+      path: plan.codeConnectPath,
+      action: "create",
+      content: buildCodeConnectScaffold(plan, prunedSpec),
+    });
+    paths.add(plan.codeConnectPath);
   }
 
   return next;
@@ -632,4 +652,64 @@ function relativeFromDir(fromDir: string, toPath: string): string {
   const suffix = toParts.slice(shared);
   const prefix = ups === 0 ? "./" : `${Array.from({ length: ups }, () => "..").join("/")}/`;
   return `${prefix}${suffix.join("/")}`;
+}
+
+/**
+ * Code Connect scaffold: links the generated component back to its Figma
+ * source so Figma's Dev Mode shows real code for this component. Variant and
+ * prop mappings are derived from the PrunedSpec; the URL comes from the
+ * file key + node id captured at push time (placeholders when unavailable).
+ */
+export function buildCodeConnectScaffold(
+  plan: CodegenFilePlan,
+  prunedSpec: PrunedSpec,
+): string {
+  const name = plan.componentName;
+  const fileKey = prunedSpec.metadata?.figmaFileKey;
+  const nodeId = prunedSpec.metadata?.figmaNodeId;
+  const url =
+    fileKey && nodeId
+      ? `https://www.figma.com/design/${fileKey}/?node-id=${nodeId.replace(/:/g, "-")}`
+      : "https://www.figma.com/design/FILE_KEY/?node-id=NODE_ID // TODO: replace with the component's Figma URL";
+
+  const propLines: string[] = [];
+  for (const [variantName, options] of Object.entries(prunedSpec.variants ?? {})) {
+    const mapping = options
+      .map((option) => `      "${option}": ${JSON.stringify(toCodeConnectValue(option))},`)
+      .join("\n");
+    propLines.push(
+      `    ${toCamelCaseIdentifier(variantName)}: figma.enum("${variantName}", {\n${mapping}\n    }),`,
+    );
+  }
+  for (const [propName, prop] of Object.entries(prunedSpec.props ?? {})) {
+    const helper = prop.type === "boolean" ? "boolean" : "string";
+    propLines.push(`    ${toCamelCaseIdentifier(propName)}: figma.${helper}("${propName}"),`);
+  }
+
+  const propsBlock = propLines.length
+    ? `  props: {\n${propLines.join("\n")}\n  },\n`
+    : "";
+
+  return `import figma from "@figma/code-connect";
+import { ${name} } from "${plan.storyImportFrom}";
+
+figma.connect(${name}, "${url}", {
+${propsBlock}  example: (props) => <${name} {...props} />,
+});
+`;
+}
+
+function toCodeConnectValue(option: string): string {
+  return option
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}
+
+function toCamelCaseIdentifier(name: string): string {
+  const cleaned = name.replace(/[^a-zA-Z0-9]+(.)?/g, (_, ch: string | undefined) =>
+    ch ? ch.toUpperCase() : "",
+  );
+  const identifier = cleaned.charAt(0).toLowerCase() + cleaned.slice(1);
+  return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(identifier) ? identifier : `prop${cleaned}`;
 }

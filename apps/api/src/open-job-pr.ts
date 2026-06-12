@@ -4,6 +4,9 @@ import {
   mergeAppendExportIntoContent,
   packageIndexExportExists,
   formatChangedPatches,
+  applyPatches,
+  runQualityGates,
+  formatQaMarkdown,
 } from "@fig2code/codegen";
 import { createGitHostProvider, type GitHostProvider } from "@fig2code/git-host";
 import type { StoredJob } from "./job-store.js";
@@ -219,6 +222,30 @@ export async function openPullRequestFromPatches(
     throw new Error("No file changes to include in the pull request");
   }
 
+  // Run the quality gates against the repo clone with the generated files
+  // applied, and attach the report to the PR body so the reviewing engineer
+  // sees typecheck/lint results alongside the code. Informational: a failing
+  // gate is surfaced in the report, not used to block the PR.
+  let qaMarkdown = "";
+  if (input.repoClonePath) {
+    try {
+      await applyPatches(input.repoClonePath, formattedPatches);
+      const qa = await runQualityGates({
+        workspaceRoot: input.repoClonePath,
+        jobId: branchSuffix,
+        eslintTargets: formattedPatches
+          .filter((patch) => patch.action !== "delete")
+          .map((patch) => patch.path),
+      });
+      qaMarkdown = formatQaMarkdown(qa);
+    } catch (err) {
+      console.warn(
+        "[fig2code] QA gates skipped:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   await git.writeFiles(vcs, auth, {
     headBranch,
     baseBranch: targetBranch,
@@ -226,6 +253,7 @@ export async function openPullRequestFromPatches(
     patches: formattedPatches,
   });
 
+  const baseBody = body ?? buildManualPullRequestBody(componentName);
   const pr = await git.openPullRequest({
     vcs,
     token: auth.token,
@@ -233,7 +261,7 @@ export async function openPullRequestFromPatches(
     headBranch,
     baseBranch: targetBranch,
     title: `Fig2Code: ${componentName}`,
-    body: body ?? buildManualPullRequestBody(componentName),
+    body: qaMarkdown ? `${baseBody}\n\n${qaMarkdown}` : baseBody,
   });
 
   return {

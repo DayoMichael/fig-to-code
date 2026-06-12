@@ -39,6 +39,8 @@ export interface PrunedSpec {
   metadata?: {
     figmaNodeId?: string;
     figmaComponentKey?: string;
+    /** Figma file key — with figmaNodeId, lets generated Code Connect link back to the design. */
+    figmaFileKey?: string;
     hash?: string;
     /** Brand/mode inferred from Figma variable modes on the selection. */
     previewTheme?: PreviewThemeContext;

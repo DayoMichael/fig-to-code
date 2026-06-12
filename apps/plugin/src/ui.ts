@@ -1276,8 +1276,19 @@ function submitCreatePullRequest() {
 
 
 
+// Capability tokens from enqueue responses, required by the job's status,
+// preview, and mutation endpoints. Held in memory for this plugin run.
+const jobTokens = new Map<string, string>();
+
+function jobAuthHeaders(jobId: string | null): Record<string, string> {
+  const token = jobId ? jobTokens.get(jobId) : undefined;
+  return token ? { "x-job-token": token } : {};
+}
+
 function buildPreviewUrl(jobId: string): string {
-  return `${apiBase}/jobs/${jobId}/preview`;
+  const token = jobTokens.get(jobId);
+  const query = token ? `?jobToken=${encodeURIComponent(token)}` : "";
+  return `${apiBase}/jobs/${jobId}/preview${query}`;
 }
 
 function withPreviewReloadToken(previewUrl: string, componentName?: string): string {
@@ -1740,7 +1751,7 @@ function copySelectedPreviewFile() {
   statusEl.textContent = "Copied file contents.";
 }
 
-function setSaveStatus(state: "saving" | "saved" | "") {
+function setSaveStatus(state: "saving" | "saved" | "error" | "") {
   if (savedFadeTimer) {
     clearTimeout(savedFadeTimer);
     savedFadeTimer = null;
@@ -1756,6 +1767,9 @@ function setSaveStatus(state: "saving" | "saved" | "") {
     } else if (state === "saved") {
       el.textContent = "Saved";
       el.classList.add("is-saved");
+    } else if (state === "error") {
+      el.textContent = "Preview not updated";
+      el.classList.add("is-error");
     } else {
       el.textContent = "";
       return;
@@ -1817,30 +1831,62 @@ function shouldHotReloadPreview(filePath: string | null): boolean {
   return Boolean(currentBuildPreview.files?.some((file) => file.path === filePath));
 }
 
+/**
+ * A failed preview mutation used to vanish into a silent catch — the iframe
+ * kept showing stale content with no hint anything went wrong. A 404 means the
+ * server lost the session (restart, idle eviction); for the existing-component
+ * preview we restart it transparently, otherwise we say what happened.
+ */
+function handlePreviewSessionFailure(status: number, context: string): void {
+  if (status === 404 && existingPreviewSessionId && currentResolvedBundle && currentSelectionId) {
+    statusEl.textContent = `${context} — restarting preview…`;
+    existingPreviewSessionId = null;
+    requestExistingPreviewForBundle(currentResolvedBundle, currentSelectionId);
+    return;
+  }
+  statusEl.textContent =
+    status === 404
+      ? `${context}: the preview session expired. Select the component again to restart it.`
+      : `${context} (${status || "network error"}).`;
+}
+
 function hotReloadPreview(filePath: string, content: string) {
   if (!currentBuildPreview || !currentPreviewJobId) return;
   if (!shouldHotReloadPreview(filePath)) return;
   if (!content.trim()) return;
 
-  fetch(`${apiBase}/jobs/${currentPreviewJobId}/preview/files`, {
+  // The existing-component preview and codegen previews live behind different
+  // routes — posting to the wrong one 404s and the edit never reaches Vite.
+  const url = existingPreviewSessionId
+    ? `${apiBase}/preview/existing/${currentPreviewJobId}/files`
+    : `${apiBase}/jobs/${currentPreviewJobId}/preview/files`;
+
+  fetch(url, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...jobAuthHeaders(currentPreviewJobId) },
     body: JSON.stringify({ path: filePath, content }),
   })
     .then((res) => {
-      if (!res.ok || !currentPreviewUrl) return;
+      if (!res.ok) {
+        setSaveStatus("error");
+        handlePreviewSessionFailure(res.status, "Saved in the editor, but the preview was not updated");
+        return;
+      }
+      if (!currentPreviewUrl) return;
       // The preview harness runs with HMR disabled (the proxy can't tunnel
       // Vite's websocket), so the saved file only shows up after a full
       // iframe reload — same pattern as theme changes.
-      const baseUrl = currentPreviewUrl.split("?")[0] ?? currentPreviewUrl;
-      const reloadUrl = withPreviewReloadToken(baseUrl, currentBuildPreview?.componentName);
+      const reloadUrl = withPreviewReloadToken(currentPreviewUrl, currentBuildPreview?.componentName);
       currentPreviewUrl = reloadUrl;
       reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
       if (!previewModalEl.classList.contains("hidden")) {
         reloadPreviewFrame(previewModalFrameEl, reloadUrl);
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      setSaveStatus("error");
+      handlePreviewSessionFailure(0, "Saved in the editor, but the preview was not updated");
+    });
 }
 
 function handleCodeEditorInput(source: CodeExplorerElements) {
@@ -2153,18 +2199,24 @@ async function applyPreviewThemeChange(reloadPreview = true): Promise<void> {
     const url = existingPreviewSessionId
       ? `${apiBase}/preview/existing/${sessionId}/theme`
       : `${apiBase}/jobs/${sessionId}/preview/theme`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand, mode }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...jobAuthHeaders(sessionId) },
+        body: JSON.stringify({ brand, mode }),
+      });
+    } catch {
+      handlePreviewSessionFailure(0, "Theme change did not reach the preview");
+      return;
+    }
     if (!res.ok) {
+      handlePreviewSessionFailure(res.status, "Theme change did not reach the preview");
       return;
     }
 
     if (reloadPreview) {
-      const baseUrl = currentPreviewUrl.split("?")[0] ?? currentPreviewUrl;
-      const reloadUrl = withPreviewReloadToken(baseUrl, currentBuildPreview?.componentName);
+      const reloadUrl = withPreviewReloadToken(currentPreviewUrl, currentBuildPreview?.componentName);
       currentPreviewUrl = reloadUrl;
       reloadPreviewFrame(buildPreviewFrameEl, reloadUrl);
       if (!previewModalEl.classList.contains("hidden")) {
@@ -3030,9 +3082,177 @@ function syncProviderFields() {
 
 providerEl.onchange = () => {
   syncProviderFields();
+  syncOAuthVisibility();
+  resetRepoPicker();
 };
 
 syncProviderFields();
+
+// ---------------------------------------------------------------------------
+// OAuth sign-in + repository picker
+// ---------------------------------------------------------------------------
+
+const oauthRowEl = document.getElementById("oauth-row")!;
+const oauthSigninBtn = document.getElementById("oauth-signin") as HTMLButtonElement;
+const oauthHintEl = document.getElementById("oauth-hint")!;
+const loadReposBtn = document.getElementById("load-repos") as HTMLButtonElement;
+const repoPickerRowEl = document.getElementById("repo-picker-row")!;
+const repoPickerEl = document.getElementById("repo-picker") as HTMLSelectElement;
+
+let oauthCapableHosts = new Set<string>();
+let oauthPollTimer: ReturnType<typeof setTimeout> | null = null;
+let pickerRepos: Array<{
+  fullName: string;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  private: boolean;
+}> = [];
+
+function syncOAuthVisibility() {
+  const provider = providerEl.value;
+  const available = oauthCapableHosts.has(provider);
+  oauthRowEl.classList.toggle("hidden", !available);
+  oauthSigninBtn.textContent =
+    provider === "bitbucket" ? "Sign in with Bitbucket" : "Sign in with GitHub";
+}
+
+function resetRepoPicker() {
+  pickerRepos = [];
+  repoPickerEl.innerHTML = '<option value="">Select a repository…</option>';
+  repoPickerRowEl.classList.add("hidden");
+}
+
+oauthSigninBtn.onclick = async () => {
+  const provider = providerEl.value;
+  if (oauthPollTimer) {
+    clearTimeout(oauthPollTimer);
+    oauthPollTimer = null;
+  }
+  oauthSigninBtn.disabled = true;
+  oauthHintEl.textContent = "Opening your browser…";
+
+  try {
+    const res = await fetch(`${apiBase}/auth/${provider}/start`, { method: "POST" });
+    const body = (await res.json()) as { authUrl?: string; pollKey?: string; error?: string };
+    if (!res.ok || !body.authUrl || !body.pollKey) {
+      throw new Error(body.error ?? `Sign-in unavailable (${res.status})`);
+    }
+
+    openExternalUrl(body.authUrl);
+    oauthHintEl.textContent = "Waiting for you to authorize in the browser…";
+    pollOAuthResult(body.pollKey, Date.now());
+  } catch (err) {
+    oauthSigninBtn.disabled = false;
+    oauthHintEl.textContent = err instanceof Error ? err.message : "Sign-in failed.";
+  }
+};
+
+function pollOAuthResult(pollKey: string, startedAt: number) {
+  const OAUTH_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  if (Date.now() - startedAt > OAUTH_POLL_TIMEOUT_MS) {
+    oauthSigninBtn.disabled = false;
+    oauthHintEl.textContent = "Sign-in timed out — try again.";
+    return;
+  }
+
+  oauthPollTimer = setTimeout(async () => {
+    try {
+      const res = await fetch(`${apiBase}/auth/result/${pollKey}`);
+      if (res.status === 202) {
+        pollOAuthResult(pollKey, startedAt);
+        return;
+      }
+      const body = (await res.json()) as { token?: string; expiresInSeconds?: number };
+      if (!res.ok || !body.token) {
+        throw new Error("Sign-in failed — try again.");
+      }
+
+      tokenEl.value = body.token;
+      if (providerEl.value === "bitbucket") {
+        // OAuth tokens authenticate with Bearer — no Atlassian email pairing.
+        atlassianEmailEl.value = "";
+      }
+      oauthSigninBtn.disabled = false;
+      oauthHintEl.textContent = body.expiresInSeconds
+        ? `Signed in ✓ (session expires in ~${Math.round(body.expiresInSeconds / 60)} min)`
+        : "Signed in ✓";
+      // Token in hand — go straight to picking the repo.
+      void loadRepositories();
+    } catch (err) {
+      oauthSigninBtn.disabled = false;
+      oauthHintEl.textContent = err instanceof Error ? err.message : "Sign-in failed.";
+    }
+  }, 2_000);
+}
+
+async function loadRepositories(): Promise<void> {
+  const token = tokenEl.value.trim();
+  if (!token) {
+    statusEl.textContent = "Enter a token or sign in first.";
+    return;
+  }
+
+  beginLoading(loadReposBtn);
+  try {
+    const res = await fetch(`${apiBase}/repos/list`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: providerEl.value,
+        token,
+        atlassianEmail: atlassianEmailEl.value.trim() || undefined,
+      }),
+    });
+    const body = (await res.json()) as {
+      repositories?: typeof pickerRepos;
+      error?: string;
+    };
+    if (!res.ok || !body.repositories) {
+      throw new Error(body.error ?? `Failed to list repositories (${res.status})`);
+    }
+
+    pickerRepos = body.repositories;
+    repoPickerEl.innerHTML =
+      '<option value="">Select a repository…</option>' +
+      pickerRepos
+        .map(
+          (repo, index) =>
+            `<option value="${index}">${escapeHtml(repo.fullName)}${repo.private ? " 🔒" : ""}</option>`,
+        )
+        .join("");
+    repoPickerRowEl.classList.remove("hidden");
+    statusEl.textContent = pickerRepos.length
+      ? `Found ${pickerRepos.length} repositories.`
+      : "No repositories visible to this token.";
+  } catch (err) {
+    statusEl.textContent = err instanceof Error ? err.message : "Failed to list repositories.";
+  } finally {
+    endLoading();
+  }
+}
+
+loadReposBtn.onclick = () => void loadRepositories();
+
+repoPickerEl.onchange = () => {
+  const repo = pickerRepos[Number(repoPickerEl.value)];
+  if (!repo) return;
+  // Fill the connect form exactly as if typed, then pull the live branch list
+  // with the default branch preselected.
+  slugAEl.value = repo.owner;
+  slugBEl.value = repo.repo;
+  for (const select of [baseBranchEl, prTargetEl]) {
+    const hasOption = Array.prototype.some.call(
+      select.options,
+      (option: HTMLOptionElement) => option.value === repo.defaultBranch,
+    );
+    if (!hasOption) {
+      select.add(new Option(repo.defaultBranch, repo.defaultBranch));
+    }
+    select.value = repo.defaultBranch;
+  }
+  loadBranchesBtn.click();
+};
 
 function formPayload(type: string) {
   const payload: Record<string, string> = {
@@ -3217,11 +3437,18 @@ async function loadCapabilities(selectedModelId?: string) {
     if (!res.ok) return;
     const body = (await res.json()) as {
       models?: Array<{ modelId: string; label: string; provider: string }>;
+      gitHosts?: Array<{ provider: string; authMethods?: string[] }>;
     };
     if (body.models?.length) {
       capabilityModels = body.models;
       syncPushModelOptions(selectedModelId);
     }
+    oauthCapableHosts = new Set(
+      (body.gitHosts ?? [])
+        .filter((host) => host.authMethods?.includes("oauth"))
+        .map((host) => host.provider),
+    );
+    syncOAuthVisibility();
   } catch {
     syncPushModelOptions(selectedModelId);
   }
@@ -3554,9 +3781,38 @@ disconnectBtn.onclick = () => {
   parent.postMessage({ pluginMessage: { type: "disconnect" } }, "*");
 };
 
+/**
+ * Git and LLM tokens travel in request headers — over plain http to a remote
+ * host they're readable in transit. Local development is the only sane http
+ * case, so warn for everything else.
+ */
+function warnIfInsecureApiBase(): void {
+  try {
+    const url = new URL(apiBase);
+    const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if (url.protocol === "http:" && !isLocal) {
+      statusEl.textContent =
+        "⚠ The API URL uses http:// — your Git and LLM tokens travel unencrypted. Use https:// for any non-local API.";
+    }
+  } catch {
+    /* unparseable URL — other validation surfaces that */
+  }
+}
+
+/**
+ * Every request is built as `${apiBase}/path`, so a trailing slash (easy to
+ * paste in) yields `host//path` — which matches no API route and surfaces as a
+ * bare "404 Not Found" in the preview iframe.
+ */
+function normalizeApiBase(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
 apiBaseEl.onchange = () => {
-  apiBase = apiBaseEl.value.trim() || apiBase;
+  apiBase = normalizeApiBase(apiBaseEl.value) || apiBase;
+  apiBaseEl.value = apiBase;
   parent.postMessage({ pluginMessage: { type: "save-api-base", apiBase } }, "*");
+  warnIfInsecureApiBase();
   void loadCapabilities();
 };
 
@@ -3786,8 +4042,10 @@ window.onmessage = (event: MessageEvent) => {
   if (!msg?.type) return;
 
   if (msg.type === "init") {
-    apiBase = (msg.apiBase as string) || apiBase;
+    // Stored values may predate trailing-slash normalization.
+    apiBase = normalizeApiBase((msg.apiBase as string) || "") || apiBase;
     apiBaseEl.value = apiBase;
+    warnIfInsecureApiBase();
     if (typeof msg.atlassianEmail === "string") {
       atlassianEmailEl.value = msg.atlassianEmail;
     }
@@ -3981,7 +4239,15 @@ window.onmessage = (event: MessageEvent) => {
   }
 
   if (msg.type === "job-created") {
-    const job = msg.job as { id: string; status: string; componentName?: string };
+    const job = msg.job as {
+      id: string;
+      status: string;
+      componentName?: string;
+      accessToken?: string;
+    };
+    if (job.accessToken) {
+      jobTokens.set(job.id, job.accessToken);
+    }
     const preservePreview =
       preservePreviewDuringJob ||
       activeStreamJobId === "pending" ||
@@ -4062,7 +4328,12 @@ window.onmessage = (event: MessageEvent) => {
     endLoading();
     setConfirmPrLoading(false);
     pendingPrModalOpen = false;
-    const message = String(msg.message ?? "Unknown error");
+    let message = String(msg.message ?? "Unknown error");
+    // Expired/revoked credentials surface as opaque 401/403s — tell the
+    // designer what to actually do about it.
+    if (/\b(401|403)\b|unauthorized|forbidden|bad credentials|token.*(invalid|expired)/i.test(message)) {
+      message += " — your Git or LLM token may have expired. Update it in Settings and try again.";
+    }
     if (!prModalEl.classList.contains("hidden")) {
       showPrModalError(message);
     } else {

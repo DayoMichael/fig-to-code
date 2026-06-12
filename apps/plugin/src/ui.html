@@ -1406,6 +1406,9 @@
       .save-status.is-fading {
         opacity: 0;
       }
+      .save-status.is-error {
+        color: #f48771;
+      }
       .preview-modal {
         position: fixed;
         inset: 0;
@@ -2941,6 +2944,9 @@
       .save-status.is-fading {
         opacity: 0;
       }
+      .save-status.is-error {
+        color: #f48771;
+      }
       .preview-modal {
         position: fixed;
         inset: 0;
@@ -3103,6 +3109,13 @@
         <option value="bitbucket">Bitbucket Cloud</option>
       </select>
 
+      <div id="oauth-row" class="hidden">
+        <button id="oauth-signin" class="secondary" type="button">
+          Sign in with GitHub
+        </button>
+        <p class="muted" id="oauth-hint" style="margin-top: 6px"></p>
+      </div>
+
       <div id="provider-fields">
         <label id="label-slug-a" for="slug-a">Owner</label>
         <input
@@ -3144,6 +3157,22 @@
         placeholder="GitHub PAT or Bitbucket API token"
         autocomplete="off"
       />
+
+      <button
+        id="load-repos"
+        class="secondary"
+        type="button"
+        data-label="Choose repository…"
+      >
+        Choose repository…
+      </button>
+
+      <div id="repo-picker-row" class="hidden">
+        <label for="repo-picker">Repository</label>
+        <select id="repo-picker">
+          <option value="">Select a repository…</option>
+        </select>
+      </div>
 
       <button
         id="load-branches"

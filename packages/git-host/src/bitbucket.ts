@@ -11,6 +11,7 @@ import type {
   PullRequestResult,
   RefSummary,
   WriteFilesInput,
+  RepositorySummary,
 } from "./types.js";
 import { asBitbucketVcs, defaultBranch } from "./vcs.js";
 
@@ -232,6 +233,41 @@ export class BitbucketProvider implements GitHostProvider {
 
     const ref = await readJson<BitbucketBranch>(response);
     return ref.target.hash;
+  }
+
+  /** Repositories the authenticated user is a member of, newest activity first. */
+  async listRepositories(auth: GitHostAuth | string): Promise<RepositorySummary[]> {
+    const credentials = asGitHostAuth(auth);
+    const repos: RepositorySummary[] = [];
+    let url: string | null =
+      "https://api.bitbucket.org/2.0/repositories?role=member&pagelen=100&sort=-updated_on";
+
+    for (let page = 0; url && page < 3; page++) {
+      const response = await bitbucketFetch(url, { auth: credentials });
+      const body = await readJson<{
+        values: Array<{
+          full_name: string;
+          slug: string;
+          is_private: boolean;
+          mainbranch?: { name?: string };
+        }>;
+        next?: string;
+      }>(response);
+
+      repos.push(
+        ...body.values.map((repo) => ({
+          provider: "bitbucket" as const,
+          fullName: repo.full_name,
+          owner: repo.full_name.split("/")[0] ?? "",
+          repo: repo.slug,
+          defaultBranch: repo.mainbranch?.name || "main",
+          private: repo.is_private,
+        })),
+      );
+      url = body.next ?? null;
+    }
+
+    return repos;
   }
 
   private async findOpenPullRequest(

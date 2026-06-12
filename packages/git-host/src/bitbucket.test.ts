@@ -89,3 +89,38 @@ describe("BitbucketProvider", () => {
     ]);
   });
 });
+
+describe("BitbucketProvider.listRepositories", () => {
+  it("maps workspace repos and follows mainbranch", async () => {
+    setFetchImplementation(async (url) => {
+      assert.match(String(url), /2\.0\/repositories\?role=member/);
+      return new Response(
+        JSON.stringify({
+          values: [
+            {
+              full_name: "acme-team/app",
+              slug: "app",
+              is_private: true,
+              mainbranch: { name: "trunk" },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const provider = new BitbucketProvider();
+    const repos = await provider.listRepositories({ token: "t" });
+    assert.deepEqual(repos, [
+      {
+        provider: "bitbucket",
+        fullName: "acme-team/app",
+        owner: "acme-team",
+        repo: "app",
+        defaultBranch: "trunk",
+        private: true,
+      },
+    ]);
+    resetFetchImplementation();
+  });
+});

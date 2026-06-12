@@ -89,7 +89,7 @@ export function createRepoCloneCache(): RepoCloneCache {
   async function getOrClone(
     vcs: VcsConfig,
     gitToken: string,
-    _atlassianEmail?: string,
+    atlassianEmail?: string,
   ): Promise<string> {
     const key = repoCacheKey(vcs);
 
@@ -122,13 +122,13 @@ export function createRepoCloneCache(): RepoCloneCache {
         await mkdir(persistentRoot, { recursive: true });
       }
       const adopted = persistentRoot
-        ? await adoptExistingClone(clonePath, vcs, gitToken)
+        ? await adoptExistingClone(clonePath, vcs, gitToken, atlassianEmail)
         : false;
       if (adopted) {
         console.log(`[fig2code] adopted persisted clone: ${key} → ${clonePath}`);
       } else {
         console.log(`[fig2code] cloning repo: ${key} → ${clonePath}`);
-        await cloneRepository({ vcs, token: gitToken, targetDir: clonePath });
+        await cloneRepository({ vcs, token: gitToken, targetDir: clonePath, atlassianEmail });
       }
 
       console.log(`[fig2code] installing deps in cached clone: ${clonePath}`);
@@ -187,6 +187,7 @@ async function adoptExistingClone(
   clonePath: string,
   vcs: VcsConfig,
   gitToken: string,
+  atlassianEmail?: string,
 ): Promise<boolean> {
   try {
     await access(path.join(clonePath, ".git"));
@@ -202,7 +203,7 @@ async function adoptExistingClone(
   try {
     await execFileAsync(
       "git",
-      ["fetch", "--depth", "1", cloneUrl(vcs, gitToken), branch],
+      ["fetch", "--depth", "1", cloneUrl(vcs, gitToken, { atlassianEmail }), branch],
       { cwd: clonePath, env: gitEnv },
     );
     await execFileAsync("git", ["reset", "--hard", "FETCH_HEAD"], {

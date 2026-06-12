@@ -10,11 +10,15 @@ export interface CloneRepoOptions {
   token: string;
   targetDir: string;
   branch?: string;
+  /** Distinguishes Bitbucket API tokens (email-paired) from OAuth/repo tokens for the git username. */
+  atlassianEmail?: string;
 }
 
 export async function cloneRepository(options: CloneRepoOptions): Promise<void> {
   const branch = options.branch ?? defaultBranch(options.vcs);
-  const url = cloneUrl(options.vcs, options.token);
+  const url = cloneUrl(options.vcs, options.token, {
+    atlassianEmail: options.atlassianEmail,
+  });
 
   try {
     await execFileAsync(

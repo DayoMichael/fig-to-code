@@ -1,4 +1,4 @@
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { access, mkdir, writeFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -340,6 +340,11 @@ function appendUnresolvedIssuesSummary(
 export async function applyPatches(workspaceRoot: string, patches: FilePatch[]): Promise<void> {
   for (const patch of patches) {
     const abs = join(workspaceRoot, patch.path);
+    // Patch paths can originate from API clients — never let them escape the
+    // workspace via `..` segments or absolute paths.
+    if (abs !== workspaceRoot && !abs.startsWith(workspaceRoot + "/") && !abs.startsWith(workspaceRoot + "\\")) {
+      throw new Error(`Refusing to apply patch outside the workspace: ${patch.path}`);
+    }
 
     if (patch.action === "delete") {
       await rm(abs, { force: true });
@@ -359,23 +364,87 @@ export async function applyPatches(workspaceRoot: string, patches: FilePatch[]):
 export interface GateRunnerOptions {
   workspaceRoot: string;
   maxRetries?: number;
+  /** Scope eslint to these paths (the generated files) instead of the whole repo. */
+  eslintTargets?: string[];
+  jobId?: string;
 }
+
+const GATE_TIMEOUT_MS = 180_000;
 
 export async function runQualityGates(options: GateRunnerOptions): Promise<QaReport> {
   const { workspaceRoot } = options;
   const gates: GateResult[] = [];
 
-  gates.push(await runGate("tsc", workspaceRoot, "npx", ["tsc", "--noEmit"]));
-  gates.push(await runGate("eslint", workspaceRoot, "npx", ["eslint", ".", "--max-warnings=0"]));
+  // Only run tools the repo is actually configured for — a missing tsconfig or
+  // eslint config would otherwise mark every PR's QA as failed for reasons
+  // unrelated to the generated code.
+  if (await fileExists(join(workspaceRoot, "tsconfig.json"))) {
+    gates.push(await runGate("tsc", workspaceRoot, "npx", ["tsc", "--noEmit"]));
+  } else {
+    gates.push(skippedGate("tsc", "no tsconfig.json at repo root"));
+  }
+
+  if (await hasEslintConfig(workspaceRoot)) {
+    const targets = options.eslintTargets?.length ? options.eslintTargets : ["."];
+    gates.push(
+      await runGate("eslint", workspaceRoot, "npx", [
+        "eslint",
+        ...targets,
+        "--max-warnings=0",
+        "--no-error-on-unmatched-pattern",
+      ]),
+    );
+  } else {
+    gates.push(skippedGate("eslint", "no eslint config found"));
+  }
 
   const passed = gates.every((g) => g.passed);
 
   return {
-    jobId: "local",
+    jobId: options.jobId ?? "local",
     gates,
     retriesUsed: 0,
     passed,
     generatedAt: new Date().toISOString(),
+  };
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasEslintConfig(root: string): Promise<boolean> {
+  const candidates = [
+    "eslint.config.js",
+    "eslint.config.mjs",
+    "eslint.config.cjs",
+    "eslint.config.ts",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".eslintrc.cjs",
+    ".eslintrc.json",
+    ".eslintrc.yaml",
+    ".eslintrc.yml",
+  ];
+  for (const candidate of candidates) {
+    if (await fileExists(join(root, candidate))) return true;
+  }
+  return false;
+}
+
+function skippedGate(name: string, reason: string): GateResult {
+  return {
+    name,
+    passed: true,
+    exitCode: 0,
+    stdout: `skipped — ${reason}`,
+    stderr: "",
+    durationMs: 0,
   };
 }
 
@@ -391,6 +460,8 @@ async function runGate(
     const { stdout, stderr } = await execFileAsync(cmd, args, {
       cwd,
       env: process.env,
+      timeout: GATE_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
     });
 
     return {

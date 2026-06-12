@@ -31,6 +31,16 @@ import {
 } from "./connection.js";
 
 const DEFAULT_API_BASE = "http://localhost:3000";
+
+/**
+ * Trailing slashes break every `${apiBase}/path` URL (`host//path` matches no
+ * API route and renders as a bare 404 in the preview iframe). Values stored
+ * before normalization existed may still carry one, so strip at every read.
+ */
+function resolveApiBase(value?: string | null): string {
+  const trimmed = value?.trim().replace(/\/+$/, "");
+  return trimmed || DEFAULT_API_BASE;
+}
 const RESOLVE_DEBOUNCE_MS = 300;
 
 interface ResolveState {
@@ -164,7 +174,7 @@ async function bootstrap(): Promise<void> {
 
   figma.ui.postMessage({
     type: "init",
-    apiBase: apiBase ?? DEFAULT_API_BASE,
+    apiBase: resolveApiBase(apiBase),
     connected: Boolean(connection && token),
     connection: connection ?? null,
     hasToken: Boolean(token),
@@ -182,7 +192,7 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadBranches(msg: LoadBranchesMessage): Promise<void> {
-  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(msg.apiBase);
 
   let vcs: VcsConfig;
   let token: string;
@@ -232,7 +242,7 @@ async function loadBranches(msg: LoadBranchesMessage): Promise<void> {
 }
 
 async function connectRepo(msg: ConnectMessage): Promise<void> {
-  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(msg.apiBase);
   const vcs = buildVcsFromMessage(msg);
 
   const res = await fetch(`${apiBase}/repos/connect`, {
@@ -292,7 +302,7 @@ async function rescanRepo(msg: RescanMessage): Promise<void> {
     throw new Error("Connect a repository before rescanning.");
   }
 
-  const apiBase = msg.apiBase ?? connection.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(msg.apiBase ?? connection.apiBase);
   const savedNotes = connection.syncConfig.llm?.notes;
   const vcs: VcsConfig = {
     ...connection.vcs,
@@ -466,7 +476,7 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
     figma.clientStorage.getAsync(STORAGE_KEYS.llmToken) as Promise<string | undefined>,
   ]);
 
-  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(msg.apiBase);
 
   if (!connection || !token) {
     figma.ui.postMessage({
@@ -537,6 +547,10 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
   });
   if (previewTheme) {
     prunedSpec.metadata = { ...prunedSpec.metadata, previewTheme };
+  }
+  // File key + node id let generated Code Connect files link back to the design.
+  if (figma.fileKey) {
+    prunedSpec.metadata = { ...prunedSpec.metadata, figmaFileKey: figma.fileKey };
   }
 
   console.log("[fig2code] build component snapshot", {
@@ -661,8 +675,20 @@ async function pushSelection(msg: PushSelectionMessage): Promise<void> {
   }
 
   const job = (await res.json()) as JobRecord;
+  if (job.accessToken) {
+    jobTokens.set(job.id, job.accessToken);
+  }
   figma.ui.postMessage({ type: "job-created", job, apiBase });
   void pollJobUntilTerminal(apiBase, job.id);
+}
+
+// Capability tokens from enqueue responses — required on every status/preview
+// request for the job. Held only in memory for the plugin run.
+const jobTokens = new Map<string, string>();
+
+function jobAuthHeaders(jobId: string): Record<string, string> {
+  const token = jobTokens.get(jobId);
+  return token ? { "x-job-token": token } : {};
 }
 
 // Poll fast at first (cache-hit jobs validate near-instantly), then back off
@@ -692,7 +718,7 @@ async function pollJobUntilTerminal(apiBase: string, jobId: string): Promise<voi
       return;
     }
 
-    const res = await fetch(`${apiBase}/jobs/${jobId}`);
+    const res = await fetch(`${apiBase}/jobs/${jobId}`, { headers: jobAuthHeaders(jobId) });
     if (!res.ok) continue;
 
     const job = (await res.json()) as JobRecord;
@@ -714,13 +740,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function pollJob(apiBase: string, jobId: string): Promise<void> {
-  const res = await fetch(`${apiBase}/jobs/${jobId}`);
+  const res = await fetch(`${apiBase}/jobs/${jobId}`, { headers: jobAuthHeaders(jobId) });
   const job = (await res.json()) as JobRecord;
   figma.ui.postMessage({ type: "job-update", job });
 }
 
 async function createPullRequest(msg: CreatePullRequestMessage): Promise<void> {
-  const apiBase = msg.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(msg.apiBase);
   const [token, atlassianEmail, connection] = await Promise.all([
     figma.clientStorage.getAsync(STORAGE_KEYS.token) as Promise<string | undefined>,
     figma.clientStorage.getAsync(STORAGE_KEYS.atlassianEmail) as Promise<string | undefined>,
@@ -760,7 +786,7 @@ async function createPullRequest(msg: CreatePullRequestMessage): Promise<void> {
 
     const res = await fetch(`${apiBase}/jobs/${msg.jobId}/pull-request`, {
       method: "POST",
-      headers,
+      headers: { ...headers, ...jobAuthHeaders(msg.jobId) },
       body: JSON.stringify(body),
     });
 
@@ -874,7 +900,7 @@ async function refreshTypographyCatalog(
     return connection.syncConfig.typography;
   }
 
-  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(connection.apiBase);
   const web = connection.syncConfig.web;
 
   const res = await fetch(`${apiBase}/repos/typography`, {
@@ -924,7 +950,7 @@ async function refreshTokenCatalog(
 
   const tokenPaths = parsedTokenPaths;
 
-  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(connection.apiBase);
   const web = connection.syncConfig.web;
 
   const res = await fetch(`${apiBase}/repos/tokens`, {
@@ -1577,7 +1603,7 @@ async function ensureExistingPreview(msg: {
     return;
   }
 
-  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(connection.apiBase);
 
   const selectionNode = figma.currentPage.selection[0];
   const themeSelection =
@@ -1669,7 +1695,7 @@ async function runResolveComponent(componentName: string, selectionId: string): 
     return;
   }
 
-  const apiBase = connection.apiBase ?? DEFAULT_API_BASE;
+  const apiBase = resolveApiBase(connection.apiBase);
 
   console.log("[fig2code] resolve-component start", {
     componentName,

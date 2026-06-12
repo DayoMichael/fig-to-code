@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { appendExportPatchToFile, buildPackageIndexAppendPatch, ensureCodegenScaffolds, finalizeBarrelExportPatches, planCodegenFiles, sanitizeUpdateBarrelPatches } from "./scaffold.js";
+import { appendExportPatchToFile, buildCodeConnectScaffold, buildPackageIndexAppendPatch, ensureCodegenScaffolds, finalizeBarrelExportPatches, planCodegenFiles, sanitizeUpdateBarrelPatches } from "./scaffold.js";
 import type { SyncConfig } from "@fig2code/spec";
 
 const baseSyncConfig: SyncConfig = {
@@ -334,5 +334,65 @@ describe("codegen scaffolds", () => {
 
     assert.equal(patches.length, 1);
     assert.equal(patches[0]?.path, "packages/ui/src/components/ui/inline-alert.tsx");
+  });
+});
+
+describe("buildCodeConnectScaffold", () => {
+  const plan = planCodegenFiles(baseSyncConfig, "Button", "src/components/Button/Button.tsx");
+
+  it("links the Figma node and maps variants and props", () => {
+    const scaffold = buildCodeConnectScaffold(plan, {
+      name: "Button",
+      kind: "component",
+      variants: { Variant: ["Primary", "Secondary"], Size: ["Small", "Large"] },
+      props: { Disabled: { type: "boolean" }, Label: { type: "text" } },
+      metadata: { figmaFileKey: "abc123", figmaNodeId: "12:34" },
+    });
+
+    assert.match(scaffold, /import figma from "@figma\/code-connect";/);
+    assert.match(scaffold, /https:\/\/www\.figma\.com\/design\/abc123\/\?node-id=12-34/);
+    assert.match(scaffold, /variant: figma\.enum\("Variant",/);
+    assert.match(scaffold, /"Primary": "primary",/);
+    assert.match(scaffold, /size: figma\.enum\("Size",/);
+    assert.match(scaffold, /disabled: figma\.boolean\("Disabled"\),/);
+    assert.match(scaffold, /label: figma\.string\("Label"\),/);
+    assert.match(scaffold, /example: \(props\) => <Button \{\.\.\.props\} \/>/);
+  });
+
+  it("falls back to a TODO url without file metadata", () => {
+    const scaffold = buildCodeConnectScaffold(plan, { name: "Button", kind: "component" });
+    assert.match(scaffold, /FILE_KEY\/\?node-id=NODE_ID \/\/ TODO/);
+  });
+
+  it("is added by ensureCodegenScaffolds only when the convention is on", () => {
+    const componentPatch = {
+      path: "src/components/Button/Button.tsx",
+      action: "create" as const,
+      content: "export const Button = () => null;",
+    };
+    const spec = {
+      name: "Button",
+      kind: "component" as const,
+      metadata: { figmaFileKey: "abc123", figmaNodeId: "12:34" },
+    };
+
+    const withCodeConnect = ensureCodegenScaffolds(
+      [componentPatch],
+      {
+        ...baseSyncConfig,
+        conventions: { ...baseSyncConfig.conventions, codeConnect: true },
+      },
+      spec,
+    );
+    assert.ok(
+      withCodeConnect.some((patch) => patch.path === "src/components/Button/Button.figma.tsx"),
+      "code connect patch generated when convention is on",
+    );
+
+    const without = ensureCodegenScaffolds([componentPatch], baseSyncConfig, spec);
+    assert.ok(
+      !without.some((patch) => patch.path.endsWith(".figma.tsx")),
+      "no code connect patch when convention is off",
+    );
   });
 });
