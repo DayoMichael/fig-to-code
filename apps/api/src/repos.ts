@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, readFile as readFs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { Hono } from "hono";
 import type {
   DetectedProjectConfig,
@@ -41,6 +43,30 @@ export interface ConnectResponseBody {
 export interface ReposRouterOptions {
   bundleStore?: BundleStore;
   repoCache?: RepoCloneCache;
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Resolve must answer from committed repo content only. The shared clone also
+ * holds preview-session artifacts — generated component files written so Vite
+ * can serve them — which are untracked by git. Treating those as repo files
+ * makes a brand-new component "resolve" to its own generated output: the
+ * plugin flips to update mode, the PR baseline becomes phantom files that were
+ * never pushed, and Create PR wrongly disables. Returns null when the clone
+ * isn't a git repo (tests use plain fixture dirs); callers then allow all
+ * files.
+ */
+async function listGitTrackedFiles(clonePath: string): Promise<Set<string> | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "-z"], {
+      cwd: clonePath,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return new Set(stdout.split("\0").filter(Boolean));
+  } catch {
+    return null;
+  }
 }
 
 export function createReposRouter(options: ReposRouterOptions = {}): Hono {
@@ -195,7 +221,10 @@ export function createReposRouter(options: ReposRouterOptions = {}): Hono {
         body.atlassianEmail,
       );
 
+      const tracked = await listGitTrackedFiles(clonePath);
       const readFile = async (filePath: string): Promise<string | null> => {
+        const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+        if (tracked && !tracked.has(normalized)) return null;
         try {
           return await readFs(join(clonePath, filePath), "utf-8");
         } catch {

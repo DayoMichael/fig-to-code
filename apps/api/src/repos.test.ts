@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { promisify } from "node:util";
 import { Hono } from "hono";
 import { fixturePath } from "@fig2code/repo";
 import { setFetchImplementation, resetFetchImplementation } from "@fig2code/git-host";
@@ -11,6 +13,8 @@ import app from "./index.js";
 import { createBundleStore } from "./bundle-store.js";
 import { createReposRouter, formatRepoUrl } from "./repos.js";
 import type { RepoCloneCache } from "./repo-cache.js";
+
+const execFileAsync = promisify(execFile);
 
 async function createResolveTestRepoCache(
   files: Record<string, string>,
@@ -243,6 +247,100 @@ describe("repos routes", () => {
       const body = (await res.json()) as ResolveComponentResponse;
       assert.equal(body.matched, false);
       assert.equal(body.bundleId, undefined);
+    } finally {
+      await rm(clonePath, { recursive: true, force: true });
+    }
+  });
+
+  it("POST /repos/resolve-component ignores untracked clone files (preview artifacts)", async () => {
+    // A real git clone where Button is committed but Phantom only exists as
+    // untracked files — exactly what the preview session leaves behind after
+    // generating a new component. Phantom must NOT resolve as a repo match,
+    // while the committed Button still does.
+    const clonePath = await mkdtemp(join(tmpdir(), "fig2code-resolve-git-"));
+    const git = (args: string[]) => execFileAsync("git", args, { cwd: clonePath });
+    await git(["init"]);
+    await git(["config", "user.email", "test@test.invalid"]);
+    await git(["config", "user.name", "test"]);
+    await mkdir(join(clonePath, "src/components/Button"), { recursive: true });
+    await writeFile(
+      join(clonePath, "src/components/Button/Button.tsx"),
+      "export const Button = () => null;\n",
+      "utf-8",
+    );
+    await git(["add", "."]);
+    await git(["commit", "-m", "init"]);
+    await mkdir(join(clonePath, "src/components/Phantom"), { recursive: true });
+    await writeFile(
+      join(clonePath, "src/components/Phantom/Phantom.tsx"),
+      "export const Phantom = () => null;\n",
+      "utf-8",
+    );
+
+    const repoCache: RepoCloneCache = {
+      getOrClone: async () => clonePath,
+      evict: async () => {},
+      evictAll: async () => {},
+    };
+    const repos = createReposRouter({ repoCache });
+    const reposApp = new Hono();
+    reposApp.route("/repos", repos);
+
+    const resolveBody = (componentName: string) =>
+      JSON.stringify({
+        token: "ghp_test",
+        componentName,
+        vcs: {
+          provider: "github",
+          owner: "acme",
+          repo: "design-system",
+          baseBranch: "main",
+          defaultPrTarget: "main",
+        },
+        syncConfig: {
+          vcs: {
+            provider: "github",
+            owner: "acme",
+            repo: "design-system",
+            baseBranch: "main",
+            defaultPrTarget: "main",
+          },
+          platforms: ["web"],
+          web: {
+            styleSystem: "tailwind",
+            componentPath: "src/components",
+            tokenPaths: ["tailwind.config.ts"],
+            iconPath: "src/icons",
+            exampleComponent: "src/components/Button/Button.tsx",
+          },
+          conventions: {
+            exportStyle: "named",
+            propsPattern: "interface",
+            fileNaming: "PascalCase",
+            testFramework: "vitest",
+            storyFormat: "csf3",
+          },
+        },
+      });
+
+    try {
+      const phantomRes = await reposApp.request("/repos/resolve-component", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: resolveBody("Phantom"),
+      });
+      assert.equal(phantomRes.status, 200);
+      const phantom = (await phantomRes.json()) as ResolveComponentResponse;
+      assert.equal(phantom.matched, false, "untracked preview artifacts must not resolve");
+
+      const buttonRes = await reposApp.request("/repos/resolve-component", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: resolveBody("Button"),
+      });
+      assert.equal(buttonRes.status, 200);
+      const button = (await buttonRes.json()) as ResolveComponentResponse;
+      assert.equal(button.matched, true, "committed files must still resolve");
     } finally {
       await rm(clonePath, { recursive: true, force: true });
     }
