@@ -1674,7 +1674,6 @@ export function createPreviewSessionManager(
     }
     session.lastAccessedAt = Date.now();
 
-    // Write to the real repo path in the clone (triggers Vite HMR)
     const targetPath = path.join(session.repoClonePath, filePath);
     await mkdir(path.dirname(targetPath), { recursive: true });
     await writeFile(targetPath, content, "utf-8");
@@ -1682,6 +1681,24 @@ export function createPreviewSessionManager(
     if (!session.generatedFiles.includes(filePath)) {
       session.generatedFiles.push(filePath);
     }
+
+    // HMR is disabled — the plugin fully reloads the iframe once this call
+    // returns, so the new content must actually be served by then. Two guards:
+    // bust the entry module so the reload re-evaluates the import graph rather
+    // than reusing a cached entry, and give Vite's watcher a beat to invalidate
+    // the edited module's cached transform before the reload lands.
+    const indexPath = path.join(session.harnessPath, "index.html");
+    try {
+      const html = await readFs(indexPath, "utf-8");
+      await writeFile(
+        indexPath,
+        html.replace(/\/main\.tsx(\?v=\d+)?/, `/main.tsx?v=${Date.now()}`),
+        "utf-8",
+      );
+    } catch {
+      // Harness html missing/unreadable — the watcher settle below still helps.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
   async function writeExistingHarnessFiles(
