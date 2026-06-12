@@ -3575,6 +3575,7 @@ apiBaseEl.onchange = () => {
 interface StreamedFile {
   path: string;
   code: string;
+  action: "create" | "update" | "delete";
   /** True once the file's content string closed — the model moved on. */
   done: boolean;
 }
@@ -3585,6 +3586,10 @@ function extractStreamedFiles(raw: string): StreamedFile[] {
   let match: RegExpExecArray | null;
   while ((match = patchRe.exec(raw))) {
     const path = (match[1] ?? "").replace(/\\\//g, "/");
+    const segment = raw.slice(match.index, patchRe.lastIndex);
+    const action = /"action"\s*:\s*"(create|update|delete)"/.exec(segment)?.[1] as
+      | StreamedFile["action"]
+      | undefined;
     let code = "";
     let done = false;
     for (let i = patchRe.lastIndex; i < raw.length; i++) {
@@ -3610,7 +3615,7 @@ function extractStreamedFiles(raw: string): StreamedFile[] {
       } else if (next !== undefined) code += next;
       i += 1;
     }
-    if (path) files.push({ path, code, done });
+    if (path) files.push({ path, code, action: action ?? "create", done });
   }
   return files;
 }
@@ -3651,23 +3656,34 @@ function updateJobStatusDisplay(job: Parameters<typeof formatJobStatus>[0]): voi
 
   const tree = files
     .map((file) => {
-      const name = file.path.split("/").pop() ?? file.path;
-      const cls = file === selected ? "stream-file active" : "stream-file";
-      const dot = file === active && !file.done ? '<span class="stream-dot"></span>' : "";
-      return `<div class="${cls}" data-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">${dot}${escapeHtml(name)}</div>`;
+      const badgeLetter = file.action === "update" ? "U" : file.action === "delete" ? "D" : "C";
+      const dot =
+        file === active && !file.done
+          ? '<span class="stream-dot stream-dot-tree"></span>'
+          : "";
+      return (
+        `<li><button type="button" class="stream-file${file === selected ? " active" : ""}" data-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">` +
+        `<span class="file-badge-wrapper"><span class="file-badge ${file.action}">${badgeLetter}</span></span>` +
+        `<span class="file-name">${escapeHtml(file.path.split("/").pop() ?? file.path)}</span>${dot}` +
+        "</button></li>"
+      );
     })
     .join("");
 
+  const streaming = Boolean(active && !active.done);
   statusEl.innerHTML =
     escapeHtml(meta.join("\n")).replace(/\n/g, "<br>") +
     '<div class="stream-code-wrap">' +
-    '<div class="stream-code-header">' +
+    '<div class="code-editor-header">' +
     `<button type="button" class="stream-tree-toggle" title="Toggle file list">${streamTreeCollapsed ? "▸" : "▾"}</button>` +
-    (selected === active && active && !active.done ? '<span class="stream-dot"></span>' : "") +
+    (selected === active && streaming ? '<span class="stream-dot"></span>' : "") +
     `<span class="stream-header-path">${escapeHtml(headerText)}</span>` +
+    (streaming ? '<span class="stream-chip">Writing…</span>' : "") +
     "</div>" +
     '<div class="stream-code-body">' +
-    (streamTreeCollapsed || !files.length ? "" : `<div class="stream-file-tree">${tree}</div>`) +
+    (streamTreeCollapsed || !files.length
+      ? ""
+      : `<ul class="build-preview-file-tree stream-tree">${tree}</ul>`) +
     '<div class="stream-code-scroll">' +
     '<div class="code-scroll-inner">' +
     `<div class="code-gutter">${renderLineNumbers(Math.max(lines.length, 1))}</div>` +
