@@ -88,6 +88,32 @@ describe("BitbucketProvider", () => {
       { name: "develop", sha: "def456" },
     ]);
   });
+
+  it("retries with Bearer when Basic auth 401s (wrong token kind for an email)", async () => {
+    const authHeaders: string[] = [];
+    setFetchImplementation(async (_url, init) => {
+      const auth = (init?.headers as Record<string, string>).Authorization;
+      authHeaders.push(auth);
+      if (auth.startsWith("Basic ")) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+      }
+      return new Response(
+        JSON.stringify({ values: [{ name: "main", target: { hash: "abc123" } }] }),
+        { status: 200 },
+      );
+    });
+
+    const provider = new BitbucketProvider();
+    // Repository access tokens are Bearer-only; the user filled the email
+    // field anyway. The first attempt (Basic) fails, the retry succeeds.
+    const refs = await provider.listRefs(vcs, {
+      token: "repo-access-token",
+      atlassianEmail: "designer@acme.com",
+    });
+    assert.deepEqual(refs, [{ name: "main", sha: "abc123" }]);
+    assert.match(authHeaders[0], /^Basic /);
+    assert.equal(authHeaders[1], "Bearer repo-access-token");
+  });
 });
 
 describe("BitbucketProvider.listRepositories", () => {

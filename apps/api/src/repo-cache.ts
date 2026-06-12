@@ -247,6 +247,24 @@ async function detectPackageManager(
 async function installDepsInRepo(repoPath: string): Promise<void> {
   const { cmd, args } = await detectPackageManager(repoPath);
 
+  try {
+    await runInstall(cmd, args, repoPath);
+  } catch (err) {
+    // Repos with peer-dependency conflicts only install the way their own
+    // developers install them — npm's strict resolver refuses outright and
+    // tells you to retry with --legacy-peer-deps. We're not the arbiter of
+    // their dependency tree; mirror what works for them.
+    const message = err instanceof Error ? err.message : String(err);
+    const npmPeerConflict = cmd.startsWith("npm") && message.includes("ERESOLVE");
+    if (!npmPeerConflict) throw err;
+    console.warn(
+      `[fig2code] npm install hit ERESOLVE in ${repoPath} — retrying with --legacy-peer-deps`,
+    );
+    await runInstall(cmd, [...args, "--legacy-peer-deps"], repoPath);
+  }
+}
+
+function runInstall(cmd: string, args: string[], repoPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd: repoPath,

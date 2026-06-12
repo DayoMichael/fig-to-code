@@ -8,10 +8,9 @@ export function formatGitHostApiError(
     if (provider === "bitbucket") {
       return [
         "Bitbucket authentication failed.",
-        "For API tokens: use your Atlassian account email (Bitbucket → Personal settings → Email aliases), not your Bitbucket username.",
-        "The token must include Repository read scope (read:repository:bitbucket).",
-        "Create tokens at id.atlassian.com → Security → API tokens → Create API token with scopes → Bitbucket Cloud.",
-        "If you use a repository access token instead, leave the email field empty.",
+        "API tokens (they start with ATATT): pair with your Atlassian account email, include Repository read scope (read:repository:bitbucket), create at id.atlassian.com → Security → API tokens → Create API token with scopes → Bitbucket Cloud.",
+        "Repository/workspace access tokens: leave the email field empty.",
+        "Signed in with Bitbucket? Sessions expire after ~2 hours — sign in again.",
       ].join(" ");
     }
 

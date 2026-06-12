@@ -225,6 +225,113 @@ const BASE_OPTIMIZE_INCLUDES = [
   "react/jsx-dev-runtime",
 ];
 
+/**
+ * Next.js runtime shims. Components in Next apps routinely import next/image,
+ * next/link, next/navigation, etc. Those modules only work inside the Next
+ * compiler/runtime — under plain Vite they either crash esbuild (next's
+ * compiled internals) or fail as raw CJS. The harness aliases them to these
+ * browser-true stand-ins, the same approach Storybook takes for Next apps.
+ */
+const NEXT_SHIM_FILES: Record<string, string> = {
+  "image.tsx": `import * as React from "react";
+const NextImage = React.forwardRef<HTMLImageElement, any>(function NextImage(props, ref) {
+  const { src, alt = "", fill, loader, quality, priority, placeholder, blurDataURL, unoptimized, onLoadingComplete, ...rest } = props;
+  const resolved = typeof src === "object" && src !== null ? src.src : src;
+  const style = fill
+    ? { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", ...rest.style }
+    : rest.style;
+  return <img ref={ref} src={resolved} alt={alt} {...rest} style={style} />;
+});
+export default NextImage;
+`,
+  "link.tsx": `import * as React from "react";
+const NextLink = React.forwardRef<HTMLAnchorElement, any>(function NextLink(props, ref) {
+  const { href, prefetch, replace, scroll, shallow, locale, legacyBehavior, children, ...rest } = props;
+  const resolved = typeof href === "string" ? href : href?.pathname ?? "#";
+  return <a ref={ref} href={resolved} {...rest}>{children}</a>;
+});
+export default NextLink;
+`,
+  "navigation.ts": `const noop = () => {};
+export function useRouter() {
+  return { push: noop, replace: noop, back: noop, forward: noop, refresh: noop, prefetch: async () => {} };
+}
+export function usePathname() { return "/"; }
+export function useSearchParams() { return new URLSearchParams(); }
+export function useParams() { return {}; }
+export function useSelectedLayoutSegment() { return null; }
+export function useSelectedLayoutSegments() { return []; }
+export function redirect(url: string): never { throw new Error("redirect(" + url + ") is not supported in the preview"); }
+export function notFound(): never { throw new Error("notFound() is not supported in the preview"); }
+`,
+  "router.ts": `const events = { on: () => {}, off: () => {}, emit: () => {} };
+const router = {
+  pathname: "/", route: "/", asPath: "/", basePath: "", query: {},
+  push: async () => true, replace: async () => true, prefetch: async () => {},
+  back: () => {}, forward: () => {}, reload: () => {},
+  events, isFallback: false, isReady: true, isPreview: false, locale: undefined,
+};
+export function useRouter() { return router; }
+export function withRouter(Component: any) { return Component; }
+export default { ...router, router, events };
+`,
+  "head.tsx": `export default function Head(): null { return null; }
+`,
+  "script.tsx": `export default function Script(): null { return null; }
+`,
+  "dynamic.tsx": `import * as React from "react";
+export default function dynamic(loader: any, options?: any) {
+  const load = typeof loader === "function" ? loader : () => loader;
+  const Lazy = React.lazy(() =>
+    Promise.resolve(load()).then((mod: any) => ({ default: mod?.default ?? mod })),
+  );
+  const fallback = options?.loading ? React.createElement(options.loading, {}) : null;
+  return function DynamicComponent(props: any) {
+    return React.createElement(
+      React.Suspense,
+      { fallback },
+      React.createElement(Lazy, props),
+    );
+  };
+}
+`,
+  "font.ts": `const font = () => ({ className: "", variable: "", style: { fontFamily: "inherit" } });
+// next/font/google exports one named function per family; cover the common ones.
+export const Inter = font, Roboto = font, Roboto_Mono = font, Open_Sans = font,
+  Montserrat = font, Poppins = font, Lato = font, Raleway = font, Nunito = font,
+  Manrope = font, DM_Sans = font, Work_Sans = font, Space_Grotesk = font,
+  Plus_Jakarta_Sans = font, IBM_Plex_Sans = font, IBM_Plex_Mono = font,
+  Source_Sans_3 = font, Source_Code_Pro = font, Fira_Code = font, Rubik = font,
+  Outfit = font, Sora = font, Urbanist = font, Figtree = font, Lexend = font,
+  Geist = font, Geist_Mono = font, JetBrains_Mono = font, Karla = font,
+  Mulish = font, Quicksand = font, Barlow = font, Heebo = font, Cabin = font,
+  Josefin_Sans = font, Libre_Franklin = font, PT_Sans = font, Noto_Sans = font,
+  Inter_Tight = font, Bricolage_Grotesque = font;
+export default font; // next/font/local
+`,
+};
+
+/** Import specifier → shim file, used as exact-match Vite aliases. */
+const NEXT_SHIM_ALIASES: Array<[specifier: string, file: string]> = [
+  ["next/image", "image.tsx"],
+  ["next/legacy/image", "image.tsx"],
+  ["next/link", "link.tsx"],
+  ["next/navigation", "navigation.ts"],
+  ["next/router", "router.ts"],
+  ["next/head", "head.tsx"],
+  ["next/script", "script.tsx"],
+  ["next/dynamic", "dynamic.tsx"],
+  ["next/font/google", "font.ts"],
+  ["next/font/local", "font.ts"],
+];
+
+function nextShimFileEntries(harnessPath: string): Array<[string, string]> {
+  return Object.entries(NEXT_SHIM_FILES).map(([file, content]) => [
+    path.join(harnessPath, "next-shims", file),
+    content,
+  ]);
+}
+
 interface DependencyAlias {
   /** Bare specifier, e.g. "@radix-ui/react-select". */
   name: string;
@@ -263,6 +370,11 @@ async function collectDependencyAliases(
     "react-is",
     "@types/react",
     "@types/react-dom",
+    // App frameworks depend on react but are not prebundleable component
+    // libraries — esbuild dies on next's compiled webpack runtime, which
+    // takes the whole Vite process (and every preview) down with it.
+    "next",
+    "gatsby",
   ]);
 
   const pkgDirs = [
@@ -337,6 +449,7 @@ function generateHarnessViteConfig(
   reactModules?: { react: string; reactDom: string },
   dependencyAliases: DependencyAlias[] = [],
   extraOptimizeIncludes: string[] = [],
+  nextShims = false,
 ): string {
   const baseOption = basePath ? `\n  base: '${basePath}',` : "";
   const aliasBlock = serializeViteAliases(
@@ -344,11 +457,25 @@ function generateHarnessViteConfig(
     reactModules,
   );
 
-  const depAliasBlock = dependencyAliases
-    .map(
-      ({ name, relPath }) =>
-        `      ${JSON.stringify(name)}: path.resolve(repoRoot, ${JSON.stringify(relPath)}),`,
-    )
+  // Shim aliases come first: object-form aliases match in insertion order, and
+  // these exact specifiers must win before any broader repo alias applies.
+  const nextShimBlock = nextShims
+    ? NEXT_SHIM_ALIASES.map(
+        ([specifier, file]) =>
+          `      ${JSON.stringify(specifier)}: path.resolve(__dirname, ${JSON.stringify(`next-shims/${file}`)}),`,
+      ).join("\n")
+    : "";
+
+  const depAliasBlock = [
+    nextShimBlock,
+    dependencyAliases
+      .map(
+        ({ name, relPath }) =>
+          `      ${JSON.stringify(name)}: path.resolve(repoRoot, ${JSON.stringify(relPath)}),`,
+      )
+      .join("\n"),
+  ]
+    .filter(Boolean)
     .join("\n");
 
   const includeList = [
@@ -362,6 +489,8 @@ function generateHarnessViteConfig(
   );
   const excludeLiteral = JSON.stringify(
     [
+      "next",
+      "gatsby",
       "@storybook/addon-essentials",
       "@storybook/addon-interactions",
       "@storybook/addon-links",
@@ -662,6 +791,7 @@ async function resolvePreviewHarnessContext(
   viteAliases: Record<string, string>;
   harnessDependencies: Record<string, string>;
   tsInclude: string[];
+  usesNext: boolean;
 }> {
   const harnessConfig = await resolveHarnessTsConfig(
     repoClonePath,
@@ -680,9 +810,14 @@ async function resolvePreviewHarnessContext(
     harnessConfig.componentPackageRoot,
   );
 
+  const usesNext = await pathExists(
+    path.join(repoClonePath, "node_modules", "next", "package.json"),
+  );
+
   return {
     harnessConfig,
     dependencyAliases,
+    usesNext,
     storybook,
     viteAliases: mergeHarnessAliases(
       harnessConfig.viteAliases,
@@ -1384,8 +1519,10 @@ async function prepareCodegenHarness(
               previewHarness.harnessConfig.reactModules,
               previewHarness.dependencyAliases,
               previewHarness.storybook?.optimizeIncludes ?? [],
+              previewHarness.usesNext,
             ),
           ],
+          ...(previewHarness.usesNext ? nextShimFileEntries(harnessPath) : []),
           [
             path.join(harnessPath, "tsconfig.json"),
             generateHarnessTsConfig({
@@ -1397,7 +1534,10 @@ async function prepareCodegenHarness(
       : [];
 
   await Promise.all(
-    [...appFiles, ...infraFiles].map(([p, content]) => writeFile(p, content, "utf-8")),
+    [...appFiles, ...infraFiles].map(async ([p, content]) => {
+      await mkdir(path.dirname(p), { recursive: true });
+      await writeFile(p, content, "utf-8");
+    }),
   );
 
   return {
@@ -1799,8 +1939,10 @@ export function createPreviewSessionManager(
           previewHarness.harnessConfig.reactModules,
           previewHarness.dependencyAliases,
           previewHarness.storybook?.optimizeIncludes ?? [],
+          previewHarness.usesNext,
         ),
       ],
+      ...(previewHarness.usesNext ? nextShimFileEntries(harnessPath) : []),
       [
         path.join(harnessPath, "tsconfig.json"),
         generateHarnessTsConfig({
@@ -1834,7 +1976,12 @@ export function createPreviewSessionManager(
       ],
     ];
 
-    await Promise.all(files.map(([filePath, content]) => writeFile(filePath, content, "utf-8")));
+    await Promise.all(
+      files.map(async ([filePath, content]) => {
+        await mkdir(path.dirname(filePath), { recursive: true });
+        await writeFile(filePath, content, "utf-8");
+      }),
+    );
   }
 
   async function restartViteForSession(

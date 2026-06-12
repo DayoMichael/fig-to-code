@@ -3082,14 +3082,14 @@ function syncProviderFields() {
 
 providerEl.onchange = () => {
   syncProviderFields();
-  syncOAuthVisibility();
   resetRepoPicker();
-  // A token belongs to one provider — switching exits OAuth mode and clears it.
+  // A token belongs to one provider — switching exits the signed-in state.
   if (oauthConnected) {
-    setOAuthConnected(false);
+    oauthConnected = false;
     tokenEl.value = "";
     oauthHintEl.textContent = "";
   }
+  syncOAuthVisibility();
 };
 
 syncProviderFields();
@@ -3124,29 +3124,53 @@ let pickerRepos: Array<{
   private: boolean;
 }> = [];
 
-function syncOAuthVisibility() {
-  const provider = providerEl.value;
-  const available = oauthCapableHosts.has(provider);
-  oauthRowEl.classList.toggle("hidden", !available);
-  oauthSigninBtn.textContent =
-    provider === "bitbucket" ? "Sign in with Bitbucket" : "Sign in with GitHub";
+// Two explicit setup flows. "oauth" (default whenever the server supports it):
+// just a sign-in button — credentials, owner/repo and branches all resolve by
+// themselves. "manual": the classic token + owner/repo fields. One link
+// toggles between them; without server OAuth support, manual is the only flow.
+let connectMode: "oauth" | "manual" = "manual";
+
+function providerSigninLabel(): string {
+  return providerEl.value === "bitbucket" ? "Sign in with Bitbucket" : "Sign in with GitHub";
 }
 
-/** Switch the connect form between OAuth mode (picker only) and manual mode. */
-function setOAuthConnected(connected: boolean) {
-  oauthConnected = connected;
-  manualConnectFieldsEl.classList.toggle("hidden", connected);
-  loadBranchesBtn.classList.toggle("hidden", connected);
-  oauthManualToggleEl.classList.toggle("hidden", !connected);
+function syncConnectFlowUi() {
+  const oauthAvailable = oauthCapableHosts.has(providerEl.value);
+  if (!oauthAvailable) connectMode = "manual";
+
+  const oauthMode = connectMode === "oauth";
+  // The row hosts both the sign-in button and the flow toggle; keep it around
+  // in manual mode too (as just the toggle) so users can switch back.
+  oauthRowEl.classList.toggle("hidden", !oauthAvailable);
+  oauthSigninBtn.classList.toggle("hidden", !oauthMode);
+  manualConnectFieldsEl.classList.toggle("hidden", oauthMode);
+  loadBranchesBtn.classList.toggle("hidden", oauthMode);
+  oauthManualToggleEl.classList.toggle("hidden", !oauthAvailable);
+  oauthManualToggleEl.textContent = oauthMode
+    ? "Use an access token instead"
+    : `${providerSigninLabel()} instead`;
+  if (!oauthConnected) {
+    oauthSigninBtn.textContent = providerSigninLabel();
+  }
+}
+
+function syncOAuthVisibility() {
+  // Default to the seamless flow whenever the server offers it.
+  connectMode = oauthCapableHosts.has(providerEl.value) ? "oauth" : "manual";
+  syncConnectFlowUi();
 }
 
 oauthManualToggleEl.onclick = () => {
-  setOAuthConnected(false);
-  resetRepoPicker();
-  tokenEl.value = "";
+  connectMode = connectMode === "oauth" ? "manual" : "oauth";
+  if (oauthConnected) {
+    // Leaving a signed-in session for manual entry — drop the invisible token
+    // so whatever the user types is what gets used.
+    oauthConnected = false;
+    tokenEl.value = "";
+    resetRepoPicker();
+  }
   oauthHintEl.textContent = "";
-  oauthSigninBtn.textContent =
-    providerEl.value === "bitbucket" ? "Sign in with Bitbucket" : "Sign in with GitHub";
+  syncConnectFlowUi();
 };
 
 function resetRepoPicker() {
@@ -3216,9 +3240,11 @@ function pollOAuthResult(pollKey: string, startedAt: number) {
       oauthHintEl.textContent = body.expiresInSeconds
         ? `Session expires in ~${Math.round(body.expiresInSeconds / 60)} min.`
         : "";
-      // Token in hand — hide the manual credential fields entirely and go
-      // straight to picking the repo from the account we just connected.
-      setOAuthConnected(true);
+      // Token in hand — stay in the seamless flow and go straight to picking
+      // the repo from the account we just connected.
+      oauthConnected = true;
+      connectMode = "oauth";
+      syncConnectFlowUi();
       void loadRepositories();
     } catch (err) {
       oauthSigninBtn.disabled = false;
@@ -3340,8 +3366,18 @@ function missingBitbucketFields(): string | null {
   // OAuth tokens authenticate with Bearer — no Atlassian email involved, so
   // requiring one here would dead-end the signed-in flow.
   if (oauthConnected) return null;
-  if (!atlassianEmailEl.value.trim()) {
-    return "Enter your Atlassian account email (required for API tokens).";
+  const token = tokenEl.value.trim();
+  const email = atlassianEmailEl.value.trim();
+  // Only Atlassian API tokens (ATATT…) use Basic auth with the account email.
+  // Repository/workspace access tokens and OAuth tokens are Bearer-only —
+  // demanding an email for those walls users off with guaranteed 401s.
+  if (token.startsWith("ATATT") && !email) {
+    return "Enter your Atlassian account email (required for ATATT… API tokens).";
+  }
+  if (!token.startsWith("ATATT") && email && token) {
+    // Wrong combo — the server retries with Bearer, but warn so they fix it.
+    statusEl.textContent =
+      "Heads up: only ATATT… API tokens use the Atlassian email. For repository access tokens, leave it empty.";
   }
   return null;
 }

@@ -18,7 +18,7 @@ export async function bitbucketFetch(
   init: RequestInit & { auth: GitHostAuth },
 ): Promise<Response> {
   const { auth, headers, ...rest } = init;
-  return fetchImpl(url, {
+  const response = await fetchImpl(url, {
     ...rest,
     headers: {
       Accept: "application/json",
@@ -26,6 +26,24 @@ export async function bitbucketFetch(
       ...headers,
     },
   });
+
+  // An email turns auth into Basic email:token — correct for Atlassian API
+  // tokens, guaranteed 401 for repository/workspace access tokens and OAuth
+  // tokens, which are Bearer-only. Users routinely fill the email field with
+  // the wrong token kind; one Bearer retry self-heals that instead of walling
+  // them off with an auth error. (Bodies here are strings, safe to resend.)
+  if (response.status === 401 && auth.atlassianEmail?.trim()) {
+    return fetchImpl(url, {
+      ...rest,
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${auth.token.trim()}`,
+        ...headers,
+      },
+    });
+  }
+
+  return response;
 }
 
 export async function hostFetch(
