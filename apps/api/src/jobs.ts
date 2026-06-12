@@ -165,6 +165,13 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
     getSession: (sessionId: string) => previewSessions.getSession(sessionId),
   };
 
+  // Cold preview starts run in the background so the iframe gets the loading
+  // card immediately instead of a blank screen on a request that hangs for the
+  // whole clone/install/Vite boot. Deduped per job; failures are kept so the
+  // next poll can surface them instead of spinning forever.
+  const pendingPreviewStarts = new Map<string, Promise<unknown>>();
+  const failedPreviewStarts = new Map<string, string>();
+
   const app = new Hono();
 
   app.post("/jobs", async (c) => {
@@ -395,23 +402,53 @@ export function createJobsRouter(options: JobsRouterOptions = {}): Hono {
       return c.json({ error: "Preview is available after a validated build" }, 404);
     }
 
-    let session = previewSessions.getSession(c.req.param("id"));
+    const jobId = c.req.param("id");
+    if (c.req.query("retry")) {
+      failedPreviewStarts.delete(jobId);
+    }
+
+    let session = previewSessions.getSession(jobId);
 
     if (!session) {
-      try {
-        session = await previewSessions.startSession(c.req.param("id"), stored.buildPreview, {
-          tokenCatalog: stored.request.syncConfig.tokens?.catalog,
-          vcs: stored.request.vcs,
-          gitToken: stored.secrets.gitToken,
-          atlassianEmail: stored.secrets.atlassianEmail,
-          formatter: stored.request.syncConfig.conventions.formatter,
-          tokenPaths: stored.request.syncConfig.web?.tokenPaths,
-          themeCatalog: stored.request.syncConfig.themes,
-          themeSelection: stored.request.prunedSpec.metadata?.previewTheme,
-        });
-      } catch (err) {
-        console.error("[fig2code] preview session start failed", err);
-        return c.json({ error: "Failed to start preview server" }, 500);
+      const failure = failedPreviewStarts.get(jobId);
+      if (failure) {
+        return c.html(previewErrorHtml(stored.buildPreview.componentName, failure), 500);
+      }
+
+      let start = pendingPreviewStarts.get(jobId);
+      if (!start) {
+        start = previewSessions
+          .startSession(jobId, stored.buildPreview, {
+            tokenCatalog: stored.request.syncConfig.tokens?.catalog,
+            vcs: stored.request.vcs,
+            gitToken: stored.secrets.gitToken,
+            atlassianEmail: stored.secrets.atlassianEmail,
+            formatter: stored.request.syncConfig.conventions.formatter,
+            tokenPaths: stored.request.syncConfig.web?.tokenPaths,
+            themeCatalog: stored.request.syncConfig.themes,
+            themeSelection: stored.request.prunedSpec.metadata?.previewTheme,
+          })
+          .catch((err) => {
+            console.error("[fig2code] preview session start failed", err);
+            failedPreviewStarts.set(
+              jobId,
+              err instanceof Error ? err.message : "Failed to start preview server",
+            );
+          })
+          .finally(() => pendingPreviewStarts.delete(jobId));
+        pendingPreviewStarts.set(jobId, start);
+      }
+
+      // Give warm swaps a moment to finish inline (single request, no loading
+      // flash); cold starts fall through to the self-polling loading card.
+      await Promise.race([start, new Promise((r) => setTimeout(r, 2000))]);
+      session = previewSessions.getSession(jobId);
+      if (!session) {
+        const failed = failedPreviewStarts.get(jobId);
+        if (failed) {
+          return c.html(previewErrorHtml(stored.buildPreview.componentName, failed), 500);
+        }
+        return c.html(previewLoadingHtml(stored.buildPreview.componentName));
       }
     }
 
@@ -675,13 +712,15 @@ function previewLoadingHtml(componentName: string): string {
     <div>Setting up preview for ${componentName}…</div>
   </div>
   <script>
-    // The preview endpoint serves this page while the session warms up and a
-    // 302 once it's ready. Probe for the redirect so the component appears the
-    // moment the server is ready, instead of waiting out a meta-refresh tick.
+    // The preview endpoint serves this page while the session warms up, a 302
+    // once it's ready, and an error status if startup failed. Probe so the
+    // component appears the moment the server is ready.
     (function poll() {
       fetch(location.href, { redirect: "manual", cache: "no-store" })
         .then((res) => {
-          if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+          // Redirect → session ready; error status → reload to show the
+          // server's error page instead of spinning forever.
+          if (res.type === "opaqueredirect" || res.status >= 300) {
             location.reload();
             return;
           }
@@ -690,6 +729,50 @@ function previewLoadingHtml(componentName: string): string {
         .catch(() => setTimeout(poll, 600));
     })();
   </script>
+</body>
+</html>`;
+}
+
+function previewErrorHtml(componentName: string, message: string): string {
+  const safeMessage = message.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safeName = componentName.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>${safeName} · Preview failed</title>
+  <style>
+    body {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: Inter, system-ui, sans-serif;
+      background: #f8fafc;
+      color: #6b7280;
+    }
+    .error-card { text-align: center; max-width: 420px; padding: 24px; }
+    .error-title { color: #b91c1c; font-weight: 600; margin-bottom: 8px; }
+    .error-detail { font-size: 12px; line-height: 1.5; white-space: pre-wrap; margin-bottom: 16px; }
+    button {
+      padding: 8px 16px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      color: #374151;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button:hover { background: #f3f4f6; }
+  </style>
+</head>
+<body>
+  <div class="error-card">
+    <div class="error-title">Preview failed to start for ${safeName}</div>
+    <div class="error-detail">${safeMessage}</div>
+    <button onclick="location.href = location.pathname + '?retry=1'">Retry</button>
+  </div>
 </body>
 </html>`;
 }

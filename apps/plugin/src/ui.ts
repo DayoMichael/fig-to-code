@@ -3572,74 +3572,125 @@ apiBaseEl.onchange = () => {
  * un-escape what has arrived so far. Before the first patch starts, fall back
  * to the raw tail (the model's preamble).
  */
-function extractStreamedCode(raw: string): { path: string | null; code: string } {
-  const patchRe = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?"content"\s*:\s*"/g;
-  let lastPath: string | null = null;
-  let contentStart = -1;
-  let match: RegExpExecArray | null;
-  while ((match = patchRe.exec(raw))) {
-    lastPath = match[1] ?? null;
-    contentStart = patchRe.lastIndex;
-  }
-  if (contentStart < 0) return { path: null, code: raw.slice(-600) };
-
-  let code = "";
-  for (let i = contentStart; i < raw.length; i++) {
-    const ch = raw[i]!;
-    if (ch === '"') break; // unescaped quote: content string finished
-    if (ch !== "\\") {
-      code += ch;
-      continue;
-    }
-    const next = raw[i + 1];
-    if (next === "n") code += "\n";
-    else if (next === "t") code += "\t";
-    else if (next === "r") code += "";
-    else if (next === "u") {
-      const hex = raw.slice(i + 2, i + 6);
-      if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-        code += String.fromCharCode(parseInt(hex, 16));
-        i += 4;
-      }
-    } else if (next !== undefined) code += next;
-    i += 1;
-  }
-  return { path: lastPath ? lastPath.replace(/\\\//g, "/") : null, code };
+interface StreamedFile {
+  path: string;
+  code: string;
+  /** True once the file's content string closed — the model moved on. */
+  done: boolean;
 }
 
+function extractStreamedFiles(raw: string): StreamedFile[] {
+  const patchRe = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?"content"\s*:\s*"/g;
+  const files: StreamedFile[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = patchRe.exec(raw))) {
+    const path = (match[1] ?? "").replace(/\\\//g, "/");
+    let code = "";
+    let done = false;
+    for (let i = patchRe.lastIndex; i < raw.length; i++) {
+      const ch = raw[i]!;
+      if (ch === '"') {
+        done = true;
+        break; // unescaped quote: content string finished
+      }
+      if (ch !== "\\") {
+        code += ch;
+        continue;
+      }
+      const next = raw[i + 1];
+      if (next === "n") code += "\n";
+      else if (next === "t") code += "\t";
+      else if (next === "r") code += "";
+      else if (next === "u") {
+        const hex = raw.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          code += String.fromCharCode(parseInt(hex, 16));
+          i += 4;
+        }
+      } else if (next !== undefined) code += next;
+      i += 1;
+    }
+    if (path) files.push({ path, code, done });
+  }
+  return files;
+}
+
+// Stream panel view state, kept across the ~300ms re-renders. A null selection
+// means "follow the file currently being written".
+let streamTreeCollapsed = false;
+let streamSelectedPath: string | null = null;
+
 /**
- * Render the live codegen stream as an IDE-style editor panel (gutter, syntax
- * highlighting, pinned-to-bottom scroll) inside the status element. Falls back
- * to plain formatJobStatus text for every other state.
+ * Render the live codegen stream as an IDE-style editor panel — collapsible
+ * file tree, gutter, syntax highlighting, pinned-to-bottom scroll — inside the
+ * status element. Falls back to plain formatJobStatus text for every other
+ * state. The HTML is built without literal newlines: #status is
+ * white-space: pre-wrap, so any formatting whitespace renders as blank lines.
  */
 function updateJobStatusDisplay(job: Parameters<typeof formatJobStatus>[0]): void {
   if (job.status !== "codegen" || !job.codegenStream) {
+    streamSelectedPath = null;
     statusEl.textContent = formatJobStatus(job);
     return;
   }
 
-  const { path, code } = extractStreamedCode(job.codegenStream);
+  const files = extractStreamedFiles(job.codegenStream);
+  const active = files.length ? files[files.length - 1]! : null;
+  const selected =
+    (streamSelectedPath && files.find((f) => f.path === streamSelectedPath)) || active;
+  const following = !streamSelectedPath || selected === active;
+  const code = selected ? selected.code : job.codegenStream.slice(-600);
+  const headerText = selected ? selected.path : "model output…";
   const lines = code ? code.split("\n") : [""];
-  const headerText = path ?? "model output…";
+
   const meta = [
     job.componentName ? `Component: ${job.componentName}` : null,
     `Job: ${job.id}`,
     `Status: ${job.status}`,
   ].filter(Boolean) as string[];
 
-  statusEl.innerHTML = `${escapeHtml(meta.join("\n")).replace(/\n/g, "<br>")}
-    <div class="stream-code-wrap">
-      <div class="stream-code-header"><span class="stream-dot"></span>${escapeHtml(headerText)}</div>
-      <div class="stream-code-scroll">
-        <div class="code-scroll-inner">
-          <div class="code-gutter">${renderLineNumbers(Math.max(lines.length, 1))}</div>
-          <pre class="code-scroll"><code>${highlightTs(code) || '<span class="tok-plain">&nbsp;</span>'}</code></pre>
-        </div>
-      </div>
-    </div>`;
+  const tree = files
+    .map((file) => {
+      const name = file.path.split("/").pop() ?? file.path;
+      const cls = file === selected ? "stream-file active" : "stream-file";
+      const dot = file === active && !file.done ? '<span class="stream-dot"></span>' : "";
+      return `<div class="${cls}" data-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">${dot}${escapeHtml(name)}</div>`;
+    })
+    .join("");
 
-  const scroller = statusEl.querySelector(".stream-code-scroll");
-  if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  statusEl.innerHTML =
+    escapeHtml(meta.join("\n")).replace(/\n/g, "<br>") +
+    '<div class="stream-code-wrap">' +
+    '<div class="stream-code-header">' +
+    `<button type="button" class="stream-tree-toggle" title="Toggle file list">${streamTreeCollapsed ? "▸" : "▾"}</button>` +
+    (selected === active && active && !active.done ? '<span class="stream-dot"></span>' : "") +
+    `<span class="stream-header-path">${escapeHtml(headerText)}</span>` +
+    "</div>" +
+    '<div class="stream-code-body">' +
+    (streamTreeCollapsed || !files.length ? "" : `<div class="stream-file-tree">${tree}</div>`) +
+    '<div class="stream-code-scroll">' +
+    '<div class="code-scroll-inner">' +
+    `<div class="code-gutter">${renderLineNumbers(Math.max(lines.length, 1))}</div>` +
+    `<pre class="code-scroll"><code>${highlightTs(code) || '<span class="tok-plain">&nbsp;</span>'}</code></pre>` +
+    "</div></div></div></div>";
+
+  statusEl.querySelector(".stream-tree-toggle")?.addEventListener("click", () => {
+    streamTreeCollapsed = !streamTreeCollapsed;
+    updateJobStatusDisplay(job);
+  });
+  statusEl.querySelectorAll<HTMLElement>(".stream-file").forEach((el) => {
+    el.addEventListener("click", () => {
+      const path = el.dataset.path ?? null;
+      // Re-clicking the active file resumes following the stream.
+      streamSelectedPath = path && files[files.length - 1]?.path === path ? null : path;
+      updateJobStatusDisplay(job);
+    });
+  });
+
+  if (following) {
+    const scroller = statusEl.querySelector(".stream-code-scroll");
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }
 }
 
 function formatJobStatus(job: {
