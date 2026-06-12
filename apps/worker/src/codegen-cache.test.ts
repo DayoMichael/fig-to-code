@@ -121,4 +121,29 @@ describe("codegen cache", () => {
     assert.equal(third.status, "validated");
     assert.equal(mock.calls.length, 2, "a new component must run the LLM");
   });
+
+  it("never caches update jobs or jobs carrying editor overrides", async () => {
+    clearCodegenCache();
+    const mock = mockProvider();
+    const overrides = [
+      {
+        path: "src/components/Button/Button.tsx",
+        role: "component",
+        content: "export const Button = () => <button>edited</button>;",
+      },
+    ];
+
+    // Same edit-carrying payload twice: both must hit the LLM, because the
+    // output depends on mutable state (repo files, in-progress edits) that
+    // the cache key cannot see.
+    for (const jobId of ["job-a", "job-b"]) {
+      const result = await processJob(
+        { ...basePayload, jobId, intent: "component-update", previewFileOverrides: overrides },
+        noopClient,
+        { llmProvider: mock, apiKey: "test-key" },
+      );
+      assert.equal(result.status, "validated");
+    }
+    assert.equal(mock.calls.length, 2, "update jobs must never replay a cached result");
+  });
 });

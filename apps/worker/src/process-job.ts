@@ -42,8 +42,17 @@ export async function processJob(
   // Repeat selections of an unchanged component produce an identical LLM
   // request. Replay the prior validated result instead of re-running codegen,
   // which keeps the model call off the per-click preview critical path.
-  const cacheKey = computeCodegenCacheKey(payload);
-  const cached = getCachedCodegen(cacheKey);
+  //
+  // Only pure first-time generations are cacheable. Update jobs and jobs
+  // carrying editor overrides depend on mutable state the key cannot see —
+  // the repo's current file contents and the designer's in-progress edits —
+  // so replaying them serves stale code that silently discards that work.
+  const cacheable =
+    payload.intent === "component" &&
+    !payload.bundleId &&
+    !payload.previewFileOverrides?.length;
+  const cacheKey = cacheable ? computeCodegenCacheKey(payload) : null;
+  const cached = cacheKey ? getCachedCodegen(cacheKey) : undefined;
   if (cached) {
     return client.patchJob(payload.jobId, {
       status: "validated",
@@ -105,7 +114,7 @@ export async function processJob(
       changeSummary: result.changeSummary,
       buildPreview,
     };
-    setCachedCodegen(cacheKey, validated);
+    if (cacheKey) setCachedCodegen(cacheKey, validated);
 
     return client.patchJob(payload.jobId, {
       status: "validated",
