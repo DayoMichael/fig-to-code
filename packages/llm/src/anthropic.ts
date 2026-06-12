@@ -49,6 +49,7 @@ export class AnthropicProvider implements LLMProvider {
       .filter((message) => message.role !== "system")
       .map((message) => ({ role: message.role, content: message.content }));
 
+    const stream = Boolean(request.onText);
     const response = await this.fetchImpl(`${this.apiBaseUrl}/v1/messages`, {
       method: "POST",
       headers: {
@@ -61,23 +62,22 @@ export class AnthropicProvider implements LLMProvider {
         max_tokens: 8192,
         system,
         messages: userMessages,
+        ...(stream ? { stream: true } : {}),
       }),
     });
 
-    const body = (await response.json()) as AnthropicMessageResponse;
-
     if (!response.ok) {
+      // Error responses are plain JSON even on streaming requests.
+      const body = (await response.json().catch(() => ({}))) as AnthropicMessageResponse;
       const err = body.error;
       const message = err?.message ?? `Anthropic API error (${response.status})`;
       const prefix = err?.type ? `${err.type}: ` : "";
       throw new Error(`${prefix}${message}`);
     }
 
-    const text = body.content
-      ?.filter((block) => block.type === "text")
-      .map((block) => block.text ?? "")
-      .join("")
-      .trim();
+    const text = stream
+      ? await this.readStreamedText(response, request.onText!)
+      : await readCompletionText(response);
 
     if (!text) {
       throw new Error("Anthropic API returned empty completion");
@@ -85,4 +85,71 @@ export class AnthropicProvider implements LLMProvider {
 
     return text;
   }
+
+  /** Consume an SSE Messages stream, forwarding text deltas as they arrive. */
+  private async readStreamedText(
+    response: Response,
+    onText: (delta: string) => void,
+  ): Promise<string> {
+    if (!response.body) {
+      throw new Error("Anthropic API returned no response body for stream");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    let text = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+
+      // SSE events are separated by blank lines; keep the trailing partial.
+      const events = buffered.split("\n\n");
+      buffered = events.pop() ?? "";
+
+      for (const event of events) {
+        for (const line of event.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          let payload: {
+            type?: string;
+            delta?: { type?: string; text?: string };
+            error?: { type?: string; message?: string };
+          };
+          try {
+            payload = JSON.parse(line.slice(5));
+          } catch {
+            continue;
+          }
+          if (payload.type === "error" || payload.error) {
+            const err = payload.error;
+            throw new Error(
+              `${err?.type ? `${err.type}: ` : ""}${err?.message ?? "Anthropic stream error"}`,
+            );
+          }
+          if (payload.type === "content_block_delta" && payload.delta?.type === "text_delta") {
+            const delta = payload.delta.text ?? "";
+            if (delta) {
+              text += delta;
+              onText(delta);
+            }
+          }
+        }
+      }
+    }
+
+    return text.trim();
+  }
+}
+
+async function readCompletionText(response: Response): Promise<string> {
+  const body = (await response.json()) as AnthropicMessageResponse;
+  return (
+    body.content
+      ?.filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .join("")
+      .trim() ?? ""
+  );
 }

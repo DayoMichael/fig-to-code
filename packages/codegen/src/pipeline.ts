@@ -62,6 +62,8 @@ export interface CodegenContext {
   intent?: JobIntent;
   existingFiles?: ExistingFilesContext;
   formatContext?: FormatPatchContext;
+  /** Receives raw LLM text deltas as codegen streams (incl. repair passes). */
+  onStreamText?: (delta: string) => void;
 }
 
 export interface CodegenRunResult {
@@ -165,7 +167,8 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
       });
 
   const provider = context.llmProvider ?? createLlmProviderForModel(modelId);
-  const raw = await provider.complete({ envelope, apiKey: context.apiKey });
+  const onText = context.onStreamText;
+  const raw = await provider.complete({ envelope, apiKey: context.apiKey, onText });
   let output: Awaited<ReturnType<typeof parseCodegenOutput>>;
   try {
     output = parseCodegenOutput(raw);
@@ -176,9 +179,11 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
       gateExitCode: 1,
       truncatedStderr: buildJsonParseRepairInstructions(parseError, raw),
     });
+    onText?.("\n\n// — repairing malformed output —\n\n");
     const repaired = await provider.complete({
       envelope: repairEnvelope,
       apiKey: context.apiKey,
+      onText,
     });
     output = parseCodegenOutput(repaired);
   }
@@ -197,9 +202,11 @@ export async function runCodegen(context: CodegenContext): Promise<CodegenRunRes
         firstPath: bestOutput.patches[0]?.path,
       },
     });
+    onText?.(`\n\n// — repairing syntax issues (attempt ${attempt}) —\n\n`);
     const repaired = await provider.complete({
       envelope: repairEnvelope,
       apiKey: context.apiKey,
+      onText,
     });
     const repairedOutput = parseCodegenOutput(repaired);
     const repairedIssues = findSyntaxIssues(repairedOutput.patches);

@@ -56,6 +56,26 @@ export async function processJob(
 
   await client.patchJob(payload.jobId, { status: "codegen" });
 
+  // Stream the model's output onto the job record as it generates, throttled
+  // so the plugin's status polling can render it near-live without hammering
+  // the API. Pushes are chained so they never interleave or outrun the final
+  // status patch.
+  const STREAM_PUSH_INTERVAL_MS = 400;
+  const STREAM_MAX_CHARS = 64_000;
+  let streamBuffer = "";
+  let lastPushAt = 0;
+  let pushChain: Promise<unknown> = Promise.resolve();
+  const onStreamText = (delta: string) => {
+    streamBuffer += delta;
+    const now = Date.now();
+    if (now - lastPushAt < STREAM_PUSH_INTERVAL_MS) return;
+    lastPushAt = now;
+    const tail = streamBuffer.slice(-STREAM_MAX_CHARS);
+    pushChain = pushChain.then(() =>
+      client.patchJob(payload.jobId, { codegenStream: tail }).catch(() => {}),
+    );
+  };
+
   try {
     const context = await hydrateCodegenContext({
       payload,
@@ -65,7 +85,9 @@ export async function processJob(
       resolveBundle: options.resolveBundle,
       fetchImpl: options.fetchImpl,
     });
+    context.onStreamText = onStreamText;
     const result = await runCodegen(context);
+    await pushChain;
     const buildPreview = buildJobPreview({
       patches: result.patches,
       prunedSpec: payload.prunedSpec,
@@ -88,11 +110,14 @@ export async function processJob(
     return client.patchJob(payload.jobId, {
       status: "validated",
       ...validated,
+      codegenStream: "",
     });
   } catch (error) {
+    await pushChain.catch(() => {});
     return client.patchJob(payload.jobId, {
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
+      codegenStream: "",
     });
   }
 }

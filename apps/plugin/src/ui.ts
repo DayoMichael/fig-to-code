@@ -3566,6 +3566,48 @@ apiBaseEl.onchange = () => {
   void loadCapabilities();
 };
 
+/**
+ * Turn the model's partially-streamed JSON patch envelope into readable code:
+ * locate the file whose "content" string is currently being written and
+ * un-escape what has arrived so far. Before the first patch starts, fall back
+ * to the raw tail (the model's preamble).
+ */
+function extractStreamedCode(raw: string): string {
+  const patchRe = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?"content"\s*:\s*"/g;
+  let lastPath: string | null = null;
+  let contentStart = -1;
+  let match: RegExpExecArray | null;
+  while ((match = patchRe.exec(raw))) {
+    lastPath = match[1] ?? null;
+    contentStart = patchRe.lastIndex;
+  }
+  if (contentStart < 0) return raw.slice(-600);
+
+  let code = "";
+  for (let i = contentStart; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (ch === '"') break; // unescaped quote: content string finished
+    if (ch !== "\\") {
+      code += ch;
+      continue;
+    }
+    const next = raw[i + 1];
+    if (next === "n") code += "\n";
+    else if (next === "t") code += "\t";
+    else if (next === "r") code += "";
+    else if (next === "u") {
+      const hex = raw.slice(i + 2, i + 6);
+      if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+        code += String.fromCharCode(parseInt(hex, 16));
+        i += 4;
+      }
+    } else if (next !== undefined) code += next;
+    i += 1;
+  }
+  const header = lastPath ? `// ${lastPath.replace(/\\\//g, "/")}\n` : "";
+  return header + code;
+}
+
 function formatJobStatus(job: {
   id: string;
   status: string;
@@ -3576,6 +3618,7 @@ function formatJobStatus(job: {
   changeSummary?: CodegenChangeSummary;
   patchCount?: number;
   buildPreview?: BuildPreview;
+  codegenStream?: string;
 }): string {
   const lines = [
     job.componentName ? `Component: ${job.componentName}` : null,
@@ -3605,6 +3648,12 @@ function formatJobStatus(job: {
         lines.push(`• ${item}`);
       }
     }
+  } else if (job.status === "codegen" && job.codegenStream) {
+    const code = extractStreamedCode(job.codegenStream);
+    // Show the live tail so it reads like the file being typed; cap it so the
+    // panel stays a viewport-sized window onto the newest output.
+    const tail = code.length > 1500 ? `…${code.slice(-1500)}` : code;
+    lines.push("", "Writing code…", "", tail);
   } else if (job.status === "queued" || job.status === "running" || job.status === "codegen") {
     lines.push("", "Worker is processing your selection…");
   } else if (job.prUrl) {

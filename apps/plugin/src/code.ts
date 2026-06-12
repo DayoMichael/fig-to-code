@@ -701,6 +701,11 @@ async function pollJobUntilTerminal(apiBase: string, jobId: string): Promise<voi
     if (isTerminalJobStatus(job.status)) {
       return;
     }
+    // While codegen streams its output onto the record, poll fast enough that
+    // the UI renders it near-live instead of letting backoff make it choppy.
+    if (job.status === "codegen") {
+      interval = Math.min(interval, 300);
+    }
   }
 }
 

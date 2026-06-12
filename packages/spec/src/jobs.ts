@@ -59,6 +59,8 @@ export interface JobRecord {
   changeSummary?: CodegenChangeSummary;
   patchCount?: number;
   buildPreview?: JobBuildPreview;
+  /** Rolling tail of the LLM's raw output while status is "codegen". */
+  codegenStream?: string;
 }
 
 export interface JobBuildPreviewFile {
