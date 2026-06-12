@@ -99,6 +99,7 @@ export function toPublicRecord(stored: StoredJob): JobRecord {
     changeSummary: stored.changeSummary,
     patchCount: stored.patchCount,
     buildPreview: stored.buildPreview,
+    codegenStream: stored.codegenStream,
   };
 }
 
