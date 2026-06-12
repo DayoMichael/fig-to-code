@@ -1409,6 +1409,20 @@
       .save-status.is-error {
         color: #f48771;
       }
+      #oauth-manual-toggle {
+        background: none;
+        border: none;
+        padding: 0;
+        margin-top: 4px;
+        font-size: 10px;
+        color: inherit;
+        opacity: 0.7;
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      #oauth-manual-toggle:hover {
+        opacity: 1;
+      }
       .preview-modal {
         position: fixed;
         inset: 0;
@@ -2947,6 +2961,20 @@
       .save-status.is-error {
         color: #f48771;
       }
+      #oauth-manual-toggle {
+        background: none;
+        border: none;
+        padding: 0;
+        margin-top: 4px;
+        font-size: 10px;
+        color: inherit;
+        opacity: 0.7;
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      #oauth-manual-toggle:hover {
+        opacity: 1;
+      }
       .preview-modal {
         position: fixed;
         inset: 0;
@@ -3114,8 +3142,12 @@
           Sign in with GitHub
         </button>
         <p class="muted" id="oauth-hint" style="margin-top: 6px"></p>
+        <button id="oauth-manual-toggle" class="hidden" type="button">
+          Use an access token instead
+        </button>
       </div>
 
+      <div id="manual-connect-fields">
       <div id="provider-fields">
         <label id="label-slug-a" for="slug-a">Owner</label>
         <input
@@ -3166,6 +3198,7 @@
       >
         Choose repository…
       </button>
+      </div>
 
       <div id="repo-picker-row" class="hidden">
         <label for="repo-picker">Repository</label>

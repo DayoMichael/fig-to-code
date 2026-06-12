@@ -3084,6 +3084,12 @@ providerEl.onchange = () => {
   syncProviderFields();
   syncOAuthVisibility();
   resetRepoPicker();
+  // A token belongs to one provider — switching exits OAuth mode and clears it.
+  if (oauthConnected) {
+    setOAuthConnected(false);
+    tokenEl.value = "";
+    oauthHintEl.textContent = "";
+  }
 };
 
 syncProviderFields();
@@ -3095,12 +3101,21 @@ syncProviderFields();
 const oauthRowEl = document.getElementById("oauth-row")!;
 const oauthSigninBtn = document.getElementById("oauth-signin") as HTMLButtonElement;
 const oauthHintEl = document.getElementById("oauth-hint")!;
+const oauthManualToggleEl = document.getElementById("oauth-manual-toggle") as HTMLButtonElement;
+const manualConnectFieldsEl = document.getElementById("manual-connect-fields")!;
 const loadReposBtn = document.getElementById("load-repos") as HTMLButtonElement;
 const repoPickerRowEl = document.getElementById("repo-picker-row")!;
 const repoPickerEl = document.getElementById("repo-picker") as HTMLSelectElement;
 
+// Registered late (declared after the actionButtons list) so it still gets the
+// shared disabled/spinner treatment instead of looking dead while fetching.
+actionButtons.push(loadReposBtn);
+
 let oauthCapableHosts = new Set<string>();
 let oauthPollTimer: ReturnType<typeof setTimeout> | null = null;
+// True once a token arrived via OAuth: credentials are invisible to the user,
+// so the owner/repo/token/email fields hide and the repo picker drives setup.
+let oauthConnected = false;
 let pickerRepos: Array<{
   fullName: string;
   owner: string;
@@ -3117,10 +3132,33 @@ function syncOAuthVisibility() {
     provider === "bitbucket" ? "Sign in with Bitbucket" : "Sign in with GitHub";
 }
 
+/** Switch the connect form between OAuth mode (picker only) and manual mode. */
+function setOAuthConnected(connected: boolean) {
+  oauthConnected = connected;
+  manualConnectFieldsEl.classList.toggle("hidden", connected);
+  loadBranchesBtn.classList.toggle("hidden", connected);
+  oauthManualToggleEl.classList.toggle("hidden", !connected);
+}
+
+oauthManualToggleEl.onclick = () => {
+  setOAuthConnected(false);
+  resetRepoPicker();
+  tokenEl.value = "";
+  oauthHintEl.textContent = "";
+  oauthSigninBtn.textContent =
+    providerEl.value === "bitbucket" ? "Sign in with Bitbucket" : "Sign in with GitHub";
+};
+
 function resetRepoPicker() {
   pickerRepos = [];
   repoPickerEl.innerHTML = '<option value="">Select a repository…</option>';
   repoPickerRowEl.classList.add("hidden");
+}
+
+function showRepoPickerLoading() {
+  repoPickerEl.innerHTML = "<option value=\"\">Loading repositories…</option>";
+  repoPickerEl.disabled = true;
+  repoPickerRowEl.classList.remove("hidden");
 }
 
 oauthSigninBtn.onclick = async () => {
@@ -3174,10 +3212,13 @@ function pollOAuthResult(pollKey: string, startedAt: number) {
         atlassianEmailEl.value = "";
       }
       oauthSigninBtn.disabled = false;
+      oauthSigninBtn.textContent = "Signed in ✓";
       oauthHintEl.textContent = body.expiresInSeconds
-        ? `Signed in ✓ (session expires in ~${Math.round(body.expiresInSeconds / 60)} min)`
-        : "Signed in ✓";
-      // Token in hand — go straight to picking the repo.
+        ? `Session expires in ~${Math.round(body.expiresInSeconds / 60)} min.`
+        : "";
+      // Token in hand — hide the manual credential fields entirely and go
+      // straight to picking the repo from the account we just connected.
+      setOAuthConnected(true);
       void loadRepositories();
     } catch (err) {
       oauthSigninBtn.disabled = false;
@@ -3194,6 +3235,7 @@ async function loadRepositories(): Promise<void> {
   }
 
   beginLoading(loadReposBtn);
+  showRepoPickerLoading();
   try {
     const res = await fetch(`${apiBase}/repos/list`, {
       method: "POST",
@@ -3213,6 +3255,7 @@ async function loadRepositories(): Promise<void> {
     }
 
     pickerRepos = body.repositories;
+    repoPickerEl.disabled = false;
     repoPickerEl.innerHTML =
       '<option value="">Select a repository…</option>' +
       pickerRepos
@@ -3222,11 +3265,30 @@ async function loadRepositories(): Promise<void> {
         )
         .join("");
     repoPickerRowEl.classList.remove("hidden");
+    if (oauthConnected) {
+      oauthHintEl.textContent = pickerRepos.length
+        ? `${pickerRepos.length} repositories found — pick one below.`
+        : "Signed in, but no repositories are visible to this account.";
+    }
     statusEl.textContent = pickerRepos.length
       ? `Found ${pickerRepos.length} repositories.`
       : "No repositories visible to this token.";
+    // One visible repo → no choice to make; connect the dots automatically.
+    if (pickerRepos.length === 1) {
+      repoPickerEl.value = "0";
+      repoPickerEl.onchange?.call(repoPickerEl, new Event("change"));
+    }
   } catch (err) {
-    statusEl.textContent = err instanceof Error ? err.message : "Failed to list repositories.";
+    const message = err instanceof Error ? err.message : "Failed to list repositories.";
+    statusEl.textContent = message;
+    resetRepoPicker();
+    if (oauthConnected) {
+      // Keep the failure next to the sign-in button — the status line is easy
+      // to miss — and turn the button back into the retry path. The manual
+      // token path stays one click away via the toggle.
+      oauthHintEl.textContent = `Could not load repositories: ${message}`;
+      oauthSigninBtn.textContent = "Try again";
+    }
   } finally {
     endLoading();
   }
@@ -3275,6 +3337,9 @@ function formPayload(type: string) {
 
 function missingBitbucketFields(): string | null {
   if (providerEl.value !== "bitbucket") return null;
+  // OAuth tokens authenticate with Bearer — no Atlassian email involved, so
+  // requiring one here would dead-end the signed-in flow.
+  if (oauthConnected) return null;
   if (!atlassianEmailEl.value.trim()) {
     return "Enter your Atlassian account email (required for API tokens).";
   }
